@@ -55,10 +55,10 @@ colour <- list(
 )
 ```
 
-# Generative Model
+## Generative Model
 Real data is great, but it also presents a plethora of challenges like formatting and cleaning that add nothing but obfuscation of our core challenge, the model development. To avoid spending time on auxiliary data issues and to better understand modelling choices and their consequences, we will simulate the data generating process.
 
-## Hill Equation
+### Hill Equation
 When a ligand, e.g. a drug, is an antagonist to a receptor that causes some tissue response, the strength of that response, $\mu_i$, declines with increased concentration of that ligand, $[A_i]$. The response is known to follow the Hill Equation [@Neubig597].
 
 $$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
@@ -125,7 +125,7 @@ tibble::tibble(
   theme_minimal()
 ```
 
-## From Domain Expertise to Probabilistic Model
+### From Domain Expertise to Probabilistic Model
 With the basic domain knowledge in place, we are ready to start thinking about the assay in terms of probability distributions.
 
 The first expression relates our observed assay responses, $y_i$, to the true underlying tissue response, $\mu_i$. Given repeat observations, the assay response should average to the tissue response and the variance should be small and finite, so it is not too far a strech to think of the assay response as a sample from a normal distribution.
@@ -146,7 +146,7 @@ The priors will always have to be specific to the assay at hand. In this study, 
 
 Let's consider each parameter in turn, starting with $n_H$.
 
-### A prior for the Hill coefficient
+#### A prior for the Hill coefficient
 
 The Hill coefficient will in many cases be well known. For instance, if the receptor that causes the tissue response is known to have only one binding site for the ligand, it extremely unlikely that we will observe any cooperative or competitive kinetics. When each ligand binds an individual receptor, the binding should be independent, regardless of the nature of the ligand. Hence, in theory, $n_H = 1$ and we can assign a narrow prior, say 
 
@@ -158,7 +158,7 @@ In case we encountered a response with cooperative binding, we would just move t
 
 We know one more thing though. The Hill coefficient cannot be less than zero, as that would change the kinetics of the system. With the narrow prior around 1 $n_H = 1$ it is not really an issue, as there is virtually no probability mass below 0, but for kinetics with diminishing returns, an exponential prior or a half-normal distribution may be preferable.
 
-### A prior for the maximum response
+#### A prior for the maximum response
 
 Before discussing the $top$ and $bottom$ parameters, it might be worth discussing assay technique. Even though the assay is performed *in vitro*, the subject, e.g. tissue, receptor, or enzyme, is often a biological construct and thus likely to exhibit batch variation. Furthermore, the raw assay reading carries no particular meaning. Instead, we employ controls to get a normalised response. For instance, we might use a bit of buffer as a negative control and assign the corresponding response to 1 and, at the other end, we might use a known strongly binding ligand as a positive control and assign the corresponding response to 0. The raw readings are then normalised between these two controls to yield the assay response, $y_i$.
 
@@ -166,14 +166,14 @@ Back to the maximum response. In most contexts, the maximum response is not all 
 
 In terms of probabilities, it means that we have very strong prior knowledge about the maximum response. We could allow it to vary some a bit, in case 
 
-# Prior and Prior Sampling
+## Prior and Prior Sampling
 
 ```{r prior}
 
 
 ```
 
-# Estimate
+## Estimate
 ```{r estimate, eval=FALSE}
 data_list <- list(
   N = 5,
@@ -185,14 +185,18 @@ post <- rstan::stan("hill_equation.stan", data = data_list, chains = 4)
 ```
 
 
-# Chain Diagnostics
+## Chain Diagnostics
 
-# Model Evaluation
+## Model Evaluation
 
-## Comparing with another fitting method
+### Comparing with another fitting method
 
-# Mistakes Were Made...
+## Mistakes Were Made...
 
-# References {-}
+## References {-}
 
 <div id="refs"></div>
+
+## License
+
+The content of this project itself is licensed under the [Attribution-ShareAlike 4.0 International license](https://creativecommons.org/licenses/by-sa/4.0/), and the underlying code is licensed under the [GNU General Public License v3.0 license](https://github.com/AnHosu/bespoke-bayesian-biochem/blob/main/LICENSE).
