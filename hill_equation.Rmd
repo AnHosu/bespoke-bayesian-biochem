@@ -1,0 +1,198 @@
+---
+title: "Bespoke Bayesian Model for Biochemical Assays"
+author: "Anders Ellegaard"
+date: '2021-11-20'
+slug: bespoke-biochem-one
+categories: []
+tags:
+- Bayesian data analysis
+- Bayesian statistics
+- R
+- Stan
+- Statistics
+- Modeling
+- Biochemistry
+subtitle: ''
+summary: Developing a bespoke Bayesian model for fitting the Hill equation in 
+  biochemical assays
+lastmod: '2021-11-17T20:33:36+01:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: yes
+projects: []
+bibliography: references.bib
+csl: citation_style.csl
+link-citations: yes
+linkcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+I am on a quest to improve the model fitting I do on biochemical assays. For  some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput. I have been using classical machine learning techniques and generic fitting and optimisation functions to interpret data from such assays. While this approach works, it also neglects much of the available domain expertise. Many of the underlying biochemical mechanisms are known and I would like my models to take that into account so I get results that are more directly interpretable in the context of the hypothesis that required the assay in the first place. In other words, I want a bespoke model.
+
+I am developing the bespoke model one minimally viable step at a time. In this study, I am building a Bayesian model for biochemical assays where the underlying data generating process is the Hill equation for tissue responses [@Neubig597].
+
+I was inspired to write this study after reading the chapter "Generalized Linear Madness" in the book Statistical Rethinking by R. McElreath [@McElreath:2016] and the writings of M. Betancourt [@Betancourt:2019]. For an introduction to bespoke Bayesian models, I highly recommend these resources.
+
+We will build the Bayesian models in Stan and make use of the Rstan interface to extract posterior samples. For data wrangling and visualisation, we will use the Tidyverse.
+```{r utilities, message=FALSE}
+library(ggplot2)
+library(magrittr)
+library(rstan)
+
+options(mc.cores = parallel::detectCores())
+
+colour <- list(
+  orange_dark = "#fb8500",
+  orange_light = "#ffb703",
+  blue_dark = "#023047",
+  azure = "#219ebc",
+  blue_light = "#8ecae6"
+)
+```
+
+# Generative Model
+Real data is great, but it also presents a plethora of challenges like formatting and cleaning that add nothing but obfuscation of our core challenge, the model development. To avoid spending time on auxiliary data issues and to better understand modelling choices and their consequences, we will simulate the data generating process.
+
+## Hill Equation
+When a ligand, e.g. a drug, is an antagonist to a receptor that causes some tissue response, the strength of that response, $\mu_i$, declines with increased concentration of that ligand, $[A_i]$. The response is known to follow the Hill Equation [@Neubig597].
+
+$$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
+
+When tissue response is plotted against log ligand concentration the Hill equation is a downwards sloping S-curve where $top$ is the maximum response and $bottom$ is the minimum response. $IC_50$ is the concentration at which the response is halfway between $top$ and $bottom$. The final parameter, the Hill coefficient $n_H$, affects the steepness of the curve and is determined by the underlying kinetics. At $n_H = 1$, a ligand binding is independent of previously bound ligands. At $n_H < 1$ binding has diminishing returns and at $n_H > 1$ ligands cooperatively bind for increasing returns on tissue response.
+
+The Hill Equation appears in various forms in literature. Notably, when the ligand is an agonist, the curve has a positive slope and the halfway point is then often named $EC_{50}$. The logarithm base used could also be any other, but base 10 is a common choice, as 10 times dilutions or other whole-number dilutions are easier to make.
+
+Let's plot an example curve
+
+```{r generative_model}
+hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
+  top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH))
+}
+```
+
+```{r hill_equation, fig.dim=c(8, 4), out.width="90%"}
+set.seed(4444)
+bottom <- 0
+top <- 1
+log_IC50 <- -3
+nH <- 1
+ggplot() +
+  xlim(log_IC50 - 3, log_IC50 + 3) +
+  geom_function(
+    fun = hill_function,
+    args = list(bottom = bottom, top = top, log_IC50 = log_IC50, nH = nH),
+    aes(colour = "Tissue response")
+  ) +
+  labs(
+    x = "log ligand concentration",
+    y = "response",
+    title = "Hill Equation Example"
+  ) +
+  scale_colour_manual(values = c("Tissue response" = colour$azure)) +
+  theme_minimal() +
+  theme(legend.title = element_blank())
+```
+
+In the real world, we cannot sample the true tissue response exactly. As a proxy for the tissue response, we employ assay that are performed *in vitro*. Such assays are sensitive to environmental conditions and, even in the most strictly controlled settings, yield noisy responses. Baring any systematic bias, the assay response, $y_i$ should average to the true tissue response. In other words, the assay readings are noisy.
+
+```{r assay_response, fig.dim=c(8, 4), out.width="90%"}
+n_obs <- 5
+tibble::tibble(
+  log_conc = seq(log_IC50 -3, log_IC50 + 3, length.out = n_obs),
+  noise = rnorm(n_obs, 0, (top - bottom)/20),
+  y = hill_function(log_conc, bottom, top, log_IC50, nH) + noise
+) %>% 
+  ggplot(aes(log_conc, y)) +
+  geom_point(aes(colour = "Noisy assay response")) +
+  geom_function(
+    fun = hill_function,
+    args = list(bottom = bottom, top = top, log_IC50 = log_IC50, nH = nH),
+    aes(colour = "Tissue response")
+  ) +
+  labs(
+    x = "log ligand concentration",
+    y = "response"
+  ) +
+  scale_colour_manual(values = c(
+    "Tissue response" = colour$azure,
+    "Noisy assay response" = colour$orange_light
+  )) +
+  theme_minimal()
+```
+
+## From Domain Expertise to Probabilistic Model
+With the basic domain knowledge in place, we are ready to start thinking about the assay in terms of probability distributions.
+
+The first expression relates our observed assay responses, $y_i$, to the true underlying tissue response, $\mu_i$. Given repeat observations, the assay response should average to the tissue response and the variance should be small and finite, so it is not too far a strech to think of the assay response as a sample from a normal distribution.
+
+$$y_i \sim {\sf Normal}(\mu_i, \sigma)$$
+
+Where $\sigma$ is a parameter that is shared among all observations.
+
+We already know how the tissue response relates to the ligand concentration, $[A_i]$, the variable of our assay; it is the Hill equation.
+
+$$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
+
+These two expressions define our observational model or likelihood function. Next, we need to specify our prior model, and this is where domain expertise comes in handy.
+
+The prior model needs to have prior assumptions and corresponding distributions for each parameter in the model. The parameters that need priors are $IC_{50}$, $bottom$, $top$, $n_H$, and $\sigma$. $\mu_i$ is an unobserved variable - it is a deterministic function of the model parameters and our variable $[A_i]$ - so it does not need a prior.
+
+The priors will always have to be specific to the assay at hand. In this study, we are not considering a real assay, but will be simulating instead. Even so, we can still discuss general prior strategies for parameters of the model, in the light of our general knowledge about the biochemical processes. Later, when we start simulating, we can lock in specific priors.
+
+Let's consider each parameter in turn, starting with $n_H$.
+
+### A prior for the Hill coefficient
+
+The Hill coefficient will in many cases be well known. For instance, if the receptor that causes the tissue response is known to have only one binding site for the ligand, it extremely unlikely that we will observe any cooperative or competitive kinetics. When each ligand binds an individual receptor, the binding should be independent, regardless of the nature of the ligand. Hence, in theory, $n_H = 1$ and we can assign a narrow prior, say 
+
+$$n_H \sim {\sf Normal}(1, 0.1)$$
+
+This prior puts 95% of the probability between 0.8 and 1.2. If we were very sure, we could go for an even narrower prior.
+
+In case we encountered a response with cooperative binding, we would just move the prior distribution a bit above 1. For instance, if we were studying hemoglobin, we could put prior at ${\sf Normal}(2.5, 0.5)$ or thereabouts.
+
+We know one more thing though. The Hill coefficient cannot be less than zero, as that would change the kinetics of the system. With the narrow prior around 1 $n_H = 1$ it is not really an issue, as there is virtually no probability mass below 0, but for kinetics with diminishing returns, an exponential prior or a half-normal distribution may be preferable.
+
+### A prior for the maximum response
+
+Before discussing the $top$ and $bottom$ parameters, it might be worth discussing assay technique. Even though the assay is performed *in vitro*, the subject, e.g. tissue, receptor, or enzyme, is often a biological construct and thus likely to exhibit batch variation. Furthermore, the raw assay reading carries no particular meaning. Instead, we employ controls to get a normalised response. For instance, we might use a bit of buffer as a negative control and assign the corresponding response to 1 and, at the other end, we might use a known strongly binding ligand as a positive control and assign the corresponding response to 0. The raw readings are then normalised between these two controls to yield the assay response, $y_i$.
+
+Back to the maximum response. In most contexts, the maximum response is not all that interesting compared to the other parameters. We expect the maximum response to be in the vicinity of the negative control, and if we were doing regular curve fitting, we might just fix the maximum response at 1.
+
+In terms of probabilities, it means that we have very strong prior knowledge about the maximum response. We could allow it to vary some a bit, in case 
+
+# Prior and Prior Sampling
+
+```{r prior}
+
+
+```
+
+# Estimate
+```{r estimate, eval=FALSE}
+data_list <- list(
+  N = 5,
+  log_conc = seq(0, 1, length.out = 5),
+  y = hill_function(seq(0, 1, length.out = 5), 0, 1, 0.3, 1) + rnorm(5, 0, 0.1)
+)
+
+post <- rstan::stan("hill_equation.stan", data = data_list, chains = 4)
+```
+
+
+# Chain Diagnostics
+
+# Model Evaluation
+
+## Comparing with another fitting method
+
+# Mistakes Were Made...
+
+# References {-}
+
+<div id="refs"></div>
