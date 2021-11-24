@@ -164,7 +164,15 @@ Before discussing the $top$ and $bottom$ parameters, it might be worth discussin
 
 Back to the maximum response. In most contexts, the maximum response is not all that interesting compared to the other parameters. We expect the maximum response to be in the vicinity of the negative control, and if we were doing regular curve fitting, we might just fix the maximum response at 1.
 
-In terms of probabilities, it means that we have very strong prior knowledge about the maximum response. We could allow it to vary some a bit, in case 
+In terms of probabilities, it means that we have very strong prior knowledge about the maximum response. We could allow it to vary a bit, but I assert that is would not offer much utility.
+
+#### A prior for the minimum response
+
+The minimum response, $bottom$, is much more interesting, as it represents the greatest effect a ligand can have on a tissue response. Analogous to the negative control, we set the response of a positive control to 0. However, we cannot necessarily fix the minimum response at this point.
+
+Imagine an assay where we are testing a chemical compound, in the hope of identifying an antagonist for the tissue response of interest. If the compound is not a ligand for the receptor, there is no response and $bottom = top$. On the other hand, if we come across a ligand, then it might elicit a stronger or weaker response than the positive control.
+
+What does this mean in terms of a prior? It means that the prior is going to depend on our experimental set up in general and knowledge about the positive control in particular. By definition $bottom$ will always be less than $top$. If we are screening 
 
 ## Prior and Prior Sampling
 
