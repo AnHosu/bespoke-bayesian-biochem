@@ -6,7 +6,7 @@ data {
 parameters {
   real bottom;
   real<lower=bottom> top;
-  real<lower=0> log_IC50;
+  real log_IC50;
   real<lower=0> nH;
   real<lower=0> sigma;
 }
@@ -14,8 +14,8 @@ model {
   vector[N] mu;
   bottom ~ normal(0, 0.05);
   top ~ normal(1, 0.01);
-  log_IC50 ~ normal(0.5, 0.2);
-  nH ~ normal(1, 0.01);
+  log_IC50 ~ normal(-6, 1.5);
+  nH ~ normal(1, 0.5);
   sigma ~ exponential(10);
   for ( i in 1:N) {
     mu[i] = top + (bottom - top)/(1 + 10^((log_IC50 - log_conc[i])*nH));
@@ -23,10 +23,10 @@ model {
   y ~ normal(mu, sigma);
 }
 generated quantities{
-  vector[N] log_liho;
+  vector[N] log_likelihood;
   vector[N] mu;
   for ( i in 1:N) {
     mu[i] = top + (bottom - top)/(1 + 10^((log_IC50 - log_conc[i])*nH));
-    log_liho[i] = normal_lpdf( y[i] | mu[i], sigma );
+    log_likelihood[i] = normal_lpdf( y[i] | mu[i], sigma );
   }
 }

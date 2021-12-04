@@ -29,7 +29,7 @@ linkcolor: blue
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(comment=NA)
 ```
 
 I am on a quest to improve the model fitting I do on biochemical assays. For  some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput. I have been using classical machine learning techniques and generic fitting and optimisation functions to interpret data from such assays. While this approach works, it also neglects much of the available domain expertise. Many of the underlying biochemical mechanisms are known and I would like my models to take that into account so I get results that are more directly interpretable in the context of the hypothesis that required the assay in the first place. In other words, I want a bespoke model.
@@ -42,7 +42,6 @@ We will build the Bayesian models in Stan and make use of the Rstan interface to
 ```{r utilities, message=FALSE}
 library(ggplot2)
 library(magrittr)
-library(rstan)
 
 options(mc.cores = parallel::detectCores())
 
@@ -101,11 +100,15 @@ ggplot() +
 In the real world, we cannot sample the true tissue response exactly. As a proxy for the tissue response, we employ assay that are performed *in vitro*. Such assays are sensitive to environmental conditions and, even in the most strictly controlled settings, yield noisy responses. Baring any systematic bias, the assay response, $y_i$ should average to the true tissue response. In other words, the assay readings are noisy.
 
 ```{r assay_response, fig.dim=c(8, 4), out.width="90%"}
+assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
+  noise <- rnorm(length(log_conc), 0, sigma)
+  hill_function(log_conc, bottom, top, log_IC50, nH) + noise
+}
+
 n_obs <- 5
 tibble::tibble(
   log_conc = seq(log_IC50 -3, log_IC50 + 3, length.out = n_obs),
-  noise = rnorm(n_obs, 0, (top - bottom)/20),
-  y = hill_function(log_conc, bottom, top, log_IC50, nH) + noise
+  y = assay_response(log_conc, bottom, top, log_IC50, nH, (top - bottom)/20)
 ) %>% 
   ggplot(aes(log_conc, y)) +
   geom_point(aes(colour = "Noisy assay response")) +
@@ -160,7 +163,7 @@ We know one more thing though. The Hill coefficient cannot be less than zero, as
 
 #### A prior for the maximum response
 
-Before discussing the $top$ and $bottom$ parameters, it might be worth discussing assay technique. Even though the assay is performed *in vitro*, the subject, e.g. tissue, receptor, or enzyme, is often a biological construct and thus likely to exhibit batch variation. Furthermore, the raw assay reading carries no particular meaning. Instead, we employ controls to get a normalised response. For instance, we might use a bit of buffer as a negative control and assign the corresponding response to 1 and, at the other end, we might use a known strongly binding ligand as a positive control and assign the corresponding response to 0. The raw readings are then normalised between these two controls to yield the assay response, $y_i$.
+When discussing the $top$ and $bottom$ parameters, it is worth discussing assay technique. Even though the assay is performed *in vitro*, the subject, e.g. tissue, receptor, or enzyme, is often a biological construct and thus likely to exhibit batch variation. Furthermore, the raw assay reading carries no particular meaning. Instead, we employ controls to get a normalised response. For instance, we might use a bit of buffer as a negative control and assign the corresponding response to 1 and, at the other end, we might use a known strongly binding ligand as a positive control and assign the corresponding response to 0. The raw readings are then normalised between these two controls to yield the assay response, $y_i$.
 
 Back to the maximum response. In most contexts, the maximum response is not all that interesting compared to the other parameters. We expect the maximum response to be in the vicinity of the negative control, and if we were doing regular curve fitting, we might just fix the maximum response at 1.
 
@@ -172,25 +175,233 @@ The minimum response, $bottom$, is much more interesting, as it represents the g
 
 Imagine an assay where we are testing a chemical compound, in the hope of identifying an antagonist for the tissue response of interest. If the compound is not a ligand for the receptor, there is no response and $bottom = top$. On the other hand, if we come across a ligand, then it might elicit a stronger or weaker response than the positive control.
 
-What does this mean in terms of a prior? It means that the prior is going to depend on our experimental set up in general and knowledge about the positive control in particular. By definition $bottom$ will always be less than $top$. If we are screening 
+What does this mean in terms of a prior? It means that screening experiments require a relatively wide prior for the $bottom$ parameter; we only know that it should be less than $top$ and that it is unlikely to be much smaller than 0. However, if we are studying the kinetics of the system and we have a known strong ligand as positive control, we can choose a much narrower prior around 0.
+
+#### A prior for potency
+
+Deciding on a prior for $IC_{50}$ is difficult for two reasons. If we are screening new compounds, we might have no idea about the potency of the compound or whether it even has potency at all. Secondly, $IC_{50}$ is a concentration and the tissue response depends on the ligand concentration relative to this concentration. In other words, it is the magnitude of the potency that matters.
+
+The way to handle this is by thinking of a prior for $\log_{10}(IC_{50})$ instead. Units matter, but if we use Molar concentration then $\log_{10}(IC_{50}) = -9$ would correspond to an extremely potent ligand and $\log_{10}(IC_{50}) = 0$ would correspond to extremely low potency.
+
+#### A prior for experiment noise
+
+Hopefully, the experiment noise is minimal. Consider $\sigma = 1$. Since we expect most readings to fall in the 0 to 1 range, this noise level translates to 95% of assay responses being within +-20% of the tissue response. This might be a lot or it might be what is expected from a biological assay, but the point is that, as long as we normalise the assay responses, this parameter should be easy to reason about. For instance, $\sigma$ can never be less than zero, and if it is higher than 0.5, then the assay is more noise than signal.
+
+## Examples
+
+Let's move on to some simulated examples
+
+### Example 1: Exploring Kinetics
+
+In this example we are imagining a situation where we are trying to learn more about the kinetics of a tissue response. We are investigating a receptor to which we have a known strongly binding antagonist. We suspect that the receptor has multiple binding sites and that ligand binding is not independent. We also do not know the potency, $IC_{50}$, of the antagonist, but we know that maximum tissue response is observed at $[A_i] > 10^{-3}$.
+
+Let's set some 'secret' values for the system and simulate assay readings. Later, we will try to recover those values
+
+```{r example_1_sim}
+example_1_params <- list(
+  bottom = 0,
+  top = 1,
+  log_IC50 = -5.6,
+  nH = 1.4,
+  sigma = 0.05
+)
+```
+
+#### A model for example 1
+
+$$y_i \sim {\sf Normal}(\mu_i, \sigma)$$
+
+$$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
+
+$$top \sim {\sf Normal}(1, 0.01)$$
+
+$$bottom \sim {\sf Normal}(0, 0.05)$$
+
+$$n_H \sim {\sf Normal}(1, 0.5)$$
+
+$$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
+
+$$\sigma \sim {\sf Exp}(10)$$
+
+
+#### Prior predictive check in Tidyverse
+
+```{r prior}
+n_samples <- 50
+
+df <- tibble::tibble(
+  top = rnorm(n_samples, 1, 0.05),
+  bottom = rnorm(n_samples, 0, 0.05),
+  nH = rnorm(n_samples, 1, 0.5),
+  log_IC50 = rnorm(n_samples, -6, 1.5),
+  sigma = rexp(n_samples, 10)
+) %>%
+  dplyr::filter(nH > 0, top > bottom) %>%
+  dplyr::mutate(
+    tissue_response = purrr::pmap(
+      list(top, bottom, nH, log_IC50, sigma),
+      ~ geom_function(
+        fun = assay_response,
+        args = list(
+          top = ..1,
+          bottom = ..2,
+          nH = ..3,
+          log_IC50 = ..4,
+          sigma = ..5
+        ),
+        colour = colour$blue_dark,
+        alpha = 0.5
+      )
+    )
+  )
+
+p <- ggplot() + xlim(-9, -3) + theme_minimal()
+Reduce(`+`, df$tissue_response, init = p)
+```
+
+
+#### Building a Stan model for example 1
+
+```{r stan_model_example_1}
+writeLines(readLines("hill_equation_example_1.stan"))
+```
+
+
+#### Fitting example 1
+
+```{r}
+n_samples <- 6
+
+example_1_concentrations <- seq(-9, -3, length.out = n_samples)
+
+example_1_observations <- rlang::exec(assay_response, example_1_concentrations, !!!example_1_params)
+
+data_list <- list(
+  N = n_samples,
+  log_conc = example_1_concentrations,
+  y = example_1_observations
+)
+
+post <- rstan::stan("hill_equation_example_1.stan", data = data_list, chains = 4)
+```
+
+```{r}
+samples <- rstan::extract(post) %>% 
+  tibble::as_tibble() %>%
+  dplyr::select(bottom, top, log_IC50, nH, sigma)
+
+samples %>%
+  tidyr::pivot_longer(dplyr::everything(), names_to = "parameter", values_to = "sample") %>%
+  dplyr::left_join(example_1_params %>% tibble::as_tibble() %>%tidyr::pivot_longer(dplyr::everything(), names_to = "parameter", values_to = "truth"), by = "parameter") %>%
+  # dplyr::group_by(parameter) %>%
+  # dplyr::summarise(samples = list(sample)) %>%
+  # tidyr::nest(samples = sample) %>%
+  # dplyr::mutate(
+  #   histogram = purrr::map(samples, ~ geom_histogram(data = .x, aes(x = sample)))
+  # )
+  ggplot() +
+  geom_histogram(aes(x = sample), bins = 50, fill = colour$azure) +
+  geom_vline(aes(xintercept = truth, colour = "truth")) +
+  facet_wrap(~ parameter, scales = "free_x") +
+  theme_minimal() +
+  scale_colour_manual(values = c("truth" = colour$orange_light)) +
+  labs(y = "Posterior sample count", x = "", colour = "")
+```
+
+
+
+```{r}
+p <- samples %>%
+  tidyr::expand_grid(log_conc = seq(-3, -9, length.out = 50)) %>% 
+  dplyr::mutate(tissue_response = purrr::pmap_dbl(
+    list(log_conc, bottom, top, log_IC50, nH),
+    hill_function
+  )) %>%
+  dplyr::group_by(log_conc) %>%
+  dplyr::summarise(
+    response_mean = mean(tissue_response),
+    response_97 = quantile(tissue_response, probs = 0.97),
+    response_3 = quantile(tissue_response, probs = 0.03)
+  ) %>%
+  ggplot() +
+  geom_ribbon(aes(x = log_conc, ymin = response_3, ymax = response_97), fill = colour$azure, alpha = 0.5) +
+  geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
+  theme_minimal()
+
+p + geom_point(data = tibble::tibble(log_conc = example_1_concentrations, observations = example_1_observations), aes(x = log_conc, y = observations, colour = "Observations")) + geom_function(fun = hill_function, args = example_1_params[-5], mapping = aes(colour = "True tissue response")) + scale_colour_manual(values = c("Posterior mean" = colour$blue_dark, "Observations" = colour$orange_light, "True tissue response" = colour$orange_dark)) + labs(y = "Tissue response", x = "Log ligand concentration [M]", colour = "")
+```
+
+
+### Example 2: New Drug
+
+In this example, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess potency, $IC_{50}$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. We do not expect the kinetics to change and we know that the ligands bind independently, i.e. $n_H = 0$.
+
+```{r example_2_sim}
+example_2_params <- list(
+  bottom = 0,
+  top = 0.8,
+  log_IC50 = -5.6,
+  nH = 1,
+  sigma = 0.1
+)
+```
+
 
 ## Prior and Prior Sampling
 
-```{r prior}
+### Example 1
+
+Prior predictive check using tidyverse
 
 
-```
+### Example 2
 
-## Estimate
-```{r estimate, eval=FALSE}
-data_list <- list(
-  N = 5,
-  log_conc = seq(0, 1, length.out = 5),
-  y = hill_function(seq(0, 1, length.out = 5), 0, 1, 0.3, 1) + rnorm(5, 0, 0.1)
+$$top \sim {\sf Normal}(1, 0.05)$$
+
+$$bottom \sim {\sf Normal}(0, 0.5)$$
+
+$$n_H \sim {\sf Normal}(1, 0.01)$$
+
+$$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
+
+$$\sigma \sim {\sf Exp}(10)$$
+
+
+Prior sampling using Stan
+```{r prior_2_stan, message=FALSE}
+N <- 50
+log_conc <- seq(-9, -3, length.out = N)
+
+prior <- rstan::stan(
+  "hill_equation_example_2_prior.stan",
+  data = list(N = N, log_conc = log_conc),
+  algorithm = "Fixed_param",
+  chains = 1,
+  iter = 100,
+  warmup = 0
 )
 
-post <- rstan::stan("hill_equation.stan", data = data_list, chains = 4)
+samp <- rstan::extract(prior)
+
+sample_readings <- lapply(1:100, function(i) {
+  tibble::tibble(
+  y = samp$y[i,],
+  x = log_conc
+) %>% 
+  geom_line(mapping = aes(x, y))
+})
+
+Reduce(`+`, sample_readings, init = ggplot())
 ```
+
+
+
+## Estimate
+```{r estimate}
+
+```
+
+
 
 
 ## Chain Diagnostics
@@ -200,6 +411,17 @@ post <- rstan::stan("hill_equation.stan", data = data_list, chains = 4)
 ### Comparing with another fitting method
 
 ## Mistakes Were Made...
+
+Forgetting priors
+
+Sampling values beyond the bound with rng
+
+Phi vs inv_Phi
+
+```{r}
+1 + 0.5*qnorm(runif(1000, pnorm(0, 1, 0.5), 1))
+```
+
 
 ## References {-}
 
