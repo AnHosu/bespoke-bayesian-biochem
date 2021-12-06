@@ -161,7 +161,7 @@ In case we encountered a response with cooperative binding, we would just move t
 
 We know one more thing though. The Hill coefficient cannot be less than zero, as that would change the kinetics of the system. With the narrow prior around 1 $n_H = 1$ it is not really an issue, as there is virtually no probability mass below 0, but for kinetics with diminishing returns, an exponential prior or a half-normal distribution may be preferable.
 
-#### A prior for the maximum response
+#### A prior for the maximum tissue response
 
 When discussing the $top$ and $bottom$ parameters, it is worth discussing assay technique. Even though the assay is performed *in vitro*, the subject, e.g. tissue, receptor, or enzyme, is often a biological construct and thus likely to exhibit batch variation. Furthermore, the raw assay reading carries no particular meaning. Instead, we employ controls to get a normalised response. For instance, we might use a bit of buffer as a negative control and assign the corresponding response to 1 and, at the other end, we might use a known strongly binding ligand as a positive control and assign the corresponding response to 0. The raw readings are then normalised between these two controls to yield the assay response, $y_i$.
 
@@ -169,7 +169,7 @@ Back to the maximum response. In most contexts, the maximum response is not all 
 
 In terms of probabilities, it means that we have very strong prior knowledge about the maximum response. We could allow it to vary a bit, but I assert that is would not offer much utility.
 
-#### A prior for the minimum response
+#### A prior for the minimum tissue response
 
 The minimum response, $bottom$, is much more interesting, as it represents the greatest effect a ligand can have on a tissue response. Analogous to the negative control, we set the response of a positive control to 0. However, we cannot necessarily fix the minimum response at this point.
 
@@ -185,7 +185,7 @@ The way to handle this is by thinking of a prior for $\log_{10}(IC_{50})$ instea
 
 #### A prior for experiment noise
 
-Hopefully, the experiment noise is minimal. Consider $\sigma = 1$. Since we expect most readings to fall in the 0 to 1 range, this noise level translates to 95% of assay responses being within +-20% of the tissue response. This might be a lot or it might be what is expected from a biological assay, but the point is that, as long as we normalise the assay responses, this parameter should be easy to reason about. For instance, $\sigma$ can never be less than zero, and if it is higher than 0.5, then the assay is more noise than signal.
+Hopefully, the experiment noise is minimal. Consider $\sigma = 0.1$. Since we expect most readings to fall in the 0 to 1 range, this noise level translates to 95% of assay responses being within +-20% of the tissue response. This might be a lot or it might be what is expected from a biological assay, but the point is that, as long as we normalise the assay responses, this parameter should be easy to reason about. For instance, $\sigma$ can never be less than zero, and if it is higher than 0.5, then the assay is more noise than signal.
 
 ## Examples
 
@@ -195,7 +195,7 @@ Let's move on to some simulated examples
 
 In this example we are imagining a situation where we are trying to learn more about the kinetics of a tissue response. We are investigating a receptor to which we have a known strongly binding antagonist. We suspect that the receptor has multiple binding sites and that ligand binding is not independent. We also do not know the potency, $IC_{50}$, of the antagonist, but we know that maximum tissue response is observed at $[A_i] > 10^{-3}$.
 
-Let's set some 'secret' values for the system and simulate assay readings. Later, we will try to recover those values
+Let's set some 'secret' values for the system and simulate assay readings. Later, we will try to recover these values
 
 ```{r example_1_sim}
 example_1_params <- list(
@@ -209,17 +209,33 @@ example_1_params <- list(
 
 #### A model for example 1
 
+Before performing the experiment, i.e. simulating observations, we should take some time to reflect on our domain expertise and translate it into a bespoke probabilistic model for this particular scenario.
+
+We know that we will measure an assay response, $y_i$, for a number of ligand concentrations $[A_i]$. We also know that the assay response averages to the tissue response, $\mu_i$, but that observations are noisy:
+
 $$y_i \sim {\sf Normal}(\mu_i, \sigma)$$
+
+The tissue response is a deterministic function of a four kinetic parameters with physical interpretation, as described by the Hill equation:
 
 $$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
 
+The $top$ parameter should, on average, be equal to our negative control, which we fix at 1. Our negative control is just water or buffer, and we have no reason to believe that the maximum tissue response when ligand concentration is infinitely small is any different from the buffer. Thus, our domain expertise tells us to put a very narrow prior on this parameter:
+
 $$top \sim {\sf Normal}(1, 0.01)$$
 
-$$bottom \sim {\sf Normal}(0, 0.05)$$
+The $bottom$ parameter should, on average, be equal to our positive control, which we fix at 0. Our positive control is an extreme concentration of the ligand to be sure that it elicits the minimum tissue response. We have no reason to believe that the minimum tissue response when ligand concentration is infinitely large is any different from the extreme concentration. Thus, our domain expertise tells us to put a very narrow prior on this parameter too:
 
-$$n_H \sim {\sf Normal}(1, 0.5)$$
+$$bottom \sim {\sf Normal}(0, 0.01)$$
+
+We do not know much about the Hill coefficient, $n_H$, as we have limited experience with the underlying kinetics. We do, however, know that the Hill coefficient should not be less than 0. While $n_H$ may be more or less than 1, we also know that it is very unlikely that it is orders of magnitude smaller or larger. We can place a wide log-normal prior on this parameter to keep it positive and we can choose distribution parameters such that there is equal probability above and below 1:
+
+$$n_H \sim {\sf LogNormal}(0, 1)$$
+
+We also do not know much about $log_{10}(IC_{50})$, but we consider -9 and -3 fairly extreme values, so we can just use a fairly wide normal prior that keeps the parameter mostly in that range:
 
 $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
+
+Finally, we should consider how noisy our observations might be. We have little experience with this assay, so we expect a lot of noise. Let's say that we expect the assay response to be within 20% above or below the tissue response, in most cases. This roughly translates to an expectation of $\sigma = 0.1$. We also know that $\sigma > 0$, so we can use an exponential prior with an expectation of 0.1, i.e. a rate of 10:
 
 $$\sigma \sim {\sf Exp}(10)$$
 
@@ -229,13 +245,17 @@ $$\sigma \sim {\sf Exp}(10)$$
 ```{r prior}
 n_samples <- 50
 
-df <- tibble::tibble(
-  top = rnorm(n_samples, 1, 0.05),
-  bottom = rnorm(n_samples, 0, 0.05),
-  nH = rnorm(n_samples, 1, 0.5),
-  log_IC50 = rnorm(n_samples, -6, 1.5),
-  sigma = rexp(n_samples, 10)
-) %>%
+example_1_priors <- function(n) {
+  tibble::tibble(
+    top = rnorm(n, 1, 0.01),
+    bottom = rnorm(n, 0, 0.01),
+    nH = rlnorm(n, 0, 1),
+    log_IC50 = rnorm(n, -6, 1.5),
+    sigma = rexp(n, 10)
+  )
+}
+
+example_1_prior_pred_samples <- example_1_priors(n_samples) %>%
   dplyr::filter(nH > 0, top > bottom) %>%
   dplyr::mutate(
     tissue_response = purrr::pmap(
@@ -255,10 +275,14 @@ df <- tibble::tibble(
     )
   )
 
-p <- ggplot() + xlim(-9, -3) + theme_minimal()
-Reduce(`+`, df$tissue_response, init = p)
+p <- ggplot() +
+  xlim(-9, -3) +
+  theme_minimal() +
+  labs(x = "Ligand concentration [M]" , y = "Prior assay response")
+Reduce(`+`, example_1_prior_pred_samples$tissue_response, init = p)
 ```
 
+I initially set the prior for $n_H$ way too wide, resulting in many extreme responses. That does not comply with domain knowledge, so I shrunk the prior.
 
 #### Building a Stan model for example 1
 
@@ -269,20 +293,32 @@ writeLines(readLines("hill_equation_example_1.stan"))
 
 #### Fitting example 1
 
-```{r}
-n_samples <- 6
+```{r post_example_1, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
+n_observations <- 6
+n_posterior_samples <- 1e3
 
-example_1_concentrations <- seq(-9, -3, length.out = n_samples)
+example_1_concentrations <- seq(-9, -3, length.out = n_observations)
 
-example_1_observations <- rlang::exec(assay_response, example_1_concentrations, !!!example_1_params)
+example_1_observations <- rlang::exec(
+  assay_response,
+  example_1_concentrations,
+  !!!example_1_params
+)
 
 data_list <- list(
-  N = n_samples,
+  N = n_observations,
   log_conc = example_1_concentrations,
   y = example_1_observations
 )
 
-post <- rstan::stan("hill_equation_example_1.stan", data = data_list, chains = 4)
+post <- rstan::stan(
+  "hill_equation_example_1.stan",
+  data = data_list,
+  chains = 4,
+  iter = n_posterior_samples * 2,
+  warmup = n_posterior_samples,
+  seed = 4444
+)
 ```
 
 ```{r}
@@ -290,22 +326,42 @@ samples <- rstan::extract(post) %>%
   tibble::as_tibble() %>%
   dplyr::select(bottom, top, log_IC50, nH, sigma)
 
+parameter_tibble <- example_1_params %>%
+  tibble::as_tibble() %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "truth"
+  )
+
 samples %>%
-  tidyr::pivot_longer(dplyr::everything(), names_to = "parameter", values_to = "sample") %>%
-  dplyr::left_join(example_1_params %>% tibble::as_tibble() %>%tidyr::pivot_longer(dplyr::everything(), names_to = "parameter", values_to = "truth"), by = "parameter") %>%
-  # dplyr::group_by(parameter) %>%
-  # dplyr::summarise(samples = list(sample)) %>%
-  # tidyr::nest(samples = sample) %>%
-  # dplyr::mutate(
-  #   histogram = purrr::map(samples, ~ geom_histogram(data = .x, aes(x = sample)))
-  # )
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  dplyr::left_join(parameter_tibble, by = "parameter") %>%
   ggplot() +
-  geom_histogram(aes(x = sample), bins = 50, fill = colour$azure) +
-  geom_vline(aes(xintercept = truth, colour = "truth")) +
-  facet_wrap(~ parameter, scales = "free_x") +
+  geom_histogram(
+    data = tidyr::pivot_longer(
+      example_1_priors(nrow(samples)),
+      dplyr::everything(),
+      names_to = "parameter",
+      values_to = "sample"
+    ),
+    mapping = aes(x = sample, fill = "Prior"),
+    bins = 50,
+    alpha = 0.5
+  ) +
+  geom_histogram(aes(x = sample, fill = "Posterior"), bins = 50, alpha = 0.5) +
+  geom_vline(aes(xintercept = truth, colour = "truth"), alpha = 0.5) +
+  facet_wrap(~ parameter, scales = "free") +
   theme_minimal() +
   scale_colour_manual(values = c("truth" = colour$orange_light)) +
-  labs(y = "Posterior sample count", x = "", colour = "")
+  scale_fill_manual(
+    values = c("Prior" = colour$azure, "Posterior" = colour$blue_dark)
+  ) +
+  labs(y = "Posterior sample count", x = "", colour = "", fill = "")
 ```
 
 
@@ -320,15 +376,15 @@ p <- samples %>%
   dplyr::group_by(log_conc) %>%
   dplyr::summarise(
     response_mean = mean(tissue_response),
-    response_97 = quantile(tissue_response, probs = 0.97),
-    response_3 = quantile(tissue_response, probs = 0.03)
+    response_upper = quantile(tissue_response, probs = 0.945),
+    response_lower = quantile(tissue_response, probs = 0.055)
   ) %>%
   ggplot() +
-  geom_ribbon(aes(x = log_conc, ymin = response_3, ymax = response_97), fill = colour$azure, alpha = 0.5) +
+  geom_ribbon(aes(x = log_conc, ymin = response_lower, ymax = response_upper, fill = "89% interval"), alpha = 0.5) +
   geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
   theme_minimal()
 
-p + geom_point(data = tibble::tibble(log_conc = example_1_concentrations, observations = example_1_observations), aes(x = log_conc, y = observations, colour = "Observations")) + geom_function(fun = hill_function, args = example_1_params[-5], mapping = aes(colour = "True tissue response")) + scale_colour_manual(values = c("Posterior mean" = colour$blue_dark, "Observations" = colour$orange_light, "True tissue response" = colour$orange_dark)) + labs(y = "Tissue response", x = "Log ligand concentration [M]", colour = "")
+p + geom_point(data = tibble::tibble(log_conc = example_1_concentrations, observations = example_1_observations), aes(x = log_conc, y = observations, colour = "Observations")) + geom_function(fun = hill_function, args = example_1_params[-5], mapping = aes(colour = "True tissue response")) + scale_colour_manual(values = c("Posterior mean" = colour$blue_dark, "Observations" = colour$orange_light, "True tissue response" = colour$orange_dark)) + labs(y = "Tissue response", x = "Log ligand concentration [M]", colour = "", fill = "") + scale_fill_manual(values = c("89% interval" = colour$azure))
 ```
 
 
@@ -381,17 +437,17 @@ prior <- rstan::stan(
   warmup = 0
 )
 
-samp <- rstan::extract(prior)
+samples <- rstan::extract(prior)
 
 sample_readings <- lapply(1:100, function(i) {
   tibble::tibble(
-  y = samp$y[i,],
+  y = samples$y[i,],
   x = log_conc
 ) %>% 
-  geom_line(mapping = aes(x, y))
+  geom_line(mapping = aes(x, y), colour = colour$blue_dark, alpha = 0.5)
 })
-
-Reduce(`+`, sample_readings, init = ggplot())
+p <- ggplot() + theme_minimal() + labs(x = "Ligand concentration [M]" , y = "Prior assay response")
+Reduce(`+`, sample_readings, init = p)
 ```
 
 
