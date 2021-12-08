@@ -20,8 +20,8 @@ data {
 }
 generated quantities{
   real<lower = 0> nH = normal_lower_rng(1, 0.01, 0);
-  real top = normal_rng(1, 0.05);
-  real bottom = normal_upper_rng(0, 0.5, top);
+  real top = normal_rng(1, 0.01);
+  real bottom = normal_upper_rng(0.25, 0.25, top);
   real log_IC50 = normal_rng(-6, 1.5);
   real sigma = exponential_rng(10);
   vector[N] mu;

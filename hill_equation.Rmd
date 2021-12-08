@@ -117,14 +117,15 @@ tibble::tibble(
     args = list(bottom = bottom, top = top, log_IC50 = log_IC50, nH = nH),
     aes(colour = "Tissue response")
   ) +
-  labs(
-    x = "log ligand concentration",
-    y = "response"
-  ) +
   scale_colour_manual(values = c(
     "Tissue response" = colour$azure,
     "Noisy assay response" = colour$orange_light
   )) +
+  labs(
+    x = "log ligand concentration",
+    y = "response",
+    colour = ""
+  ) +
   theme_minimal()
 ```
 
@@ -189,16 +190,16 @@ Hopefully, the experiment noise is minimal. Consider $\sigma = 0.1$. Since we ex
 
 ## Examples
 
-Let's move on to some simulated examples
+Let's move on to some simulated studies
 
-### Example 1: Exploring Kinetics
+### Study 1: Exploring Kinetics
 
-In this example we are imagining a situation where we are trying to learn more about the kinetics of a tissue response. We are investigating a receptor to which we have a known strongly binding antagonist. We suspect that the receptor has multiple binding sites and that ligand binding is not independent. We also do not know the potency, $IC_{50}$, of the antagonist, but we know that maximum tissue response is observed at $[A_i] > 10^{-3}$.
+In this study we are imagining a situation where we are trying to learn more about the kinetics of a tissue response. We are investigating a receptor to which we have a known strongly binding antagonist. We suspect that the receptor has multiple binding sites and that ligand binding is not independent. We also do not know the potency, $IC_{50}$, of the antagonist, but we know that maximum tissue response is observed at $[A_i] > 10^{-3}$.
 
 Let's set some 'secret' values for the system and simulate assay readings. Later, we will try to recover these values
 
 ```{r example_1_sim}
-example_1_params <- list(
+study_1_params <- list(
   bottom = 0,
   top = 1,
   log_IC50 = -5.6,
@@ -207,7 +208,7 @@ example_1_params <- list(
 )
 ```
 
-#### A model for example 1
+#### A model for study 1
 
 Before performing the experiment, i.e. simulating observations, we should take some time to reflect on our domain expertise and translate it into a bespoke probabilistic model for this particular scenario.
 
@@ -239,13 +240,16 @@ Finally, we should consider how noisy our observations might be. We have little 
 
 $$\sigma \sim {\sf Exp}(10)$$
 
-
 #### Prior predictive check in Tidyverse
 
-```{r prior}
-n_samples <- 50
+With the model specified, my hands are itching to start fitting. That would be a poor idea, though. Before fitting, we should verify that the model as a whole conforms to our domain knowledge. Even though we have chosen what we think are reasonable priors, it it difficult to get an intuition about how all those priors interact. However, since the model is probabilistic and generative, we can sample predictions from it without fitting anything first. If the distribution of those prior predictions agree with our expectations, then we are good to go.
 
-example_1_priors <- function(n) {
+For a simple model like this, it is fairly easy to perform such a prior predictive check with Tidyverse and basic R functionality. First we sample parameters from the prior distributions, then we calculate the deterministic variables, and draw out the curves.
+
+```{r prior_pred_check_example_1}
+n_samples <- 50
+# A function to easily sample prior parameters
+study_1_priors <- function(n) {
   tibble::tibble(
     top = rnorm(n, 1, 0.01),
     bottom = rnorm(n, 0, 0.01),
@@ -254,9 +258,9 @@ example_1_priors <- function(n) {
     sigma = rexp(n, 10)
   )
 }
-
-example_1_prior_pred_samples <- example_1_priors(n_samples) %>%
-  dplyr::filter(nH > 0, top > bottom) %>%
+# Draw each corresponding assay response
+study_1_prior_pred_samples <- study_1_priors(n_samples) %>%
+  dplyr::filter(top > bottom) %>% # This is very unlikely to happen though
   dplyr::mutate(
     tissue_response = purrr::pmap(
       list(top, bottom, nH, log_IC50, sigma),
@@ -279,40 +283,53 @@ p <- ggplot() +
   xlim(-9, -3) +
   theme_minimal() +
   labs(x = "Ligand concentration [M]" , y = "Prior assay response")
-Reduce(`+`, example_1_prior_pred_samples$tissue_response, init = p)
+Reduce(`+`, study_1_prior_pred_samples$tissue_response, init = p)
 ```
 
-I initially set the prior for $n_H$ way too wide, resulting in many extreme responses. That does not comply with domain knowledge, so I shrunk the prior.
+This looks much like the curves we would expect from a real assay. Extreme concentrations have extreme responses and the s-shaped curve is somewhere in between. In some cases, the noise is extreme but that is probably to be expected from an assay where we have little or no experience.
 
-#### Building a Stan model for example 1
+I initially set the prior for $n_H$ way too wide, resulting in many extreme responses. That does not comply with domain knowledge, so I shrunk the prior. 
+
+#### Building a Stan model for study 1
+
+Now we are almost ready to fit the model. To do so, I have implemented it in Stan. There are other excellent introductions to Stan, see the [Stan User Guide](https://mc-stan.org/docs/2_28/stan-users-guide/index.html) or some of the references below.
+
+Here is the Stan model that corresponds to the model described above.
 
 ```{r stan_model_example_1}
-writeLines(readLines("hill_equation_example_1.stan"))
+writeLines(readLines("hill_equation_study_1.stan"))
 ```
 
+#### Fitting study 1
 
-#### Fitting example 1
+Now we can simulate some observations and fit the model. To make the simulation realistic, we generate observations in a wide space of ligand concentration, from $log_{10}([A_i]) = -9$ to $log_{10}([A_i]) = -3$. To make it a challenge, we will generate just 6 observations.
+
+Fitting our bespoke Bayesian model amounts to sampling from the posterior distribution. Here I am drawing 1000 samples per chain from the posterior. This is not a large model, so we could easily sample a lot more if we wanted.
 
 ```{r post_example_1, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
 n_observations <- 6
 n_posterior_samples <- 1e3
 
-example_1_concentrations <- seq(-9, -3, length.out = n_observations)
+# Determine the log concentrations at which to simulate
+study_1_concentrations <- seq(-9, -3, length.out = n_observations)
 
-example_1_observations <- rlang::exec(
+# Simulate observations using our 'secret' parameters
+study_1_observations <- rlang::exec(
   assay_response,
-  example_1_concentrations,
-  !!!example_1_params
+  study_1_concentrations,
+  !!!study_1_params
 )
 
+# Everything the model needs to know
 data_list <- list(
   N = n_observations,
-  log_conc = example_1_concentrations,
-  y = example_1_observations
+  log_conc = study_1_concentrations,
+  y = study_1_observations
 )
 
+# This compiles the model and samples from the posterior
 post <- rstan::stan(
-  "hill_equation_example_1.stan",
+  "hill_equation_study_1.stan",
   data = data_list,
   chains = 4,
   iter = n_posterior_samples * 2,
@@ -321,12 +338,18 @@ post <- rstan::stan(
 )
 ```
 
-```{r}
-samples <- rstan::extract(post) %>% 
+Now we have samples from the posterior distribution. Let's put them to work!
+
+Recall that the underlying research question was the kinetics of the tissue response. So more than the actual tissue response, we are interested in the posterior marginal distributions for the Hill coefficient, $n_H$, and the potency, $log_{10}(IC_{50})$. We can extract samples for the marginal distribution of each of our model parameters.
+
+```{r posterior_marginals_example_1}
+# Extract samples from the posterior distribution
+posterior_samples <- rstan::extract(post) %>% 
   tibble::as_tibble() %>%
   dplyr::select(bottom, top, log_IC50, nH, sigma)
 
-parameter_tibble <- example_1_params %>%
+# True parameters of the simulation.
+parameter_tibble <- study_1_params %>%
   tibble::as_tibble() %>%
   tidyr::pivot_longer(
     dplyr::everything(),
@@ -334,7 +357,9 @@ parameter_tibble <- example_1_params %>%
     values_to = "truth"
   )
 
-samples %>%
+# Plot each of the marginal distributions, comparing prior, posterior, and true
+#  simulation parameters
+posterior_samples %>%
   tidyr::pivot_longer(
     dplyr::everything(),
     names_to = "parameter",
@@ -344,7 +369,7 @@ samples %>%
   ggplot() +
   geom_histogram(
     data = tidyr::pivot_longer(
-      example_1_priors(nrow(samples)),
+      study_1_priors(nrow(posterior_samples)),
       dplyr::everything(),
       names_to = "parameter",
       values_to = "sample"
@@ -361,13 +386,40 @@ samples %>%
   scale_fill_manual(
     values = c("Prior" = colour$azure, "Posterior" = colour$blue_dark)
   ) +
-  labs(y = "Posterior sample count", x = "", colour = "", fill = "")
+  labs(
+    y = "Posterior sample count",
+    x = "",
+    colour = "",
+    fill = "",
+    title = "Marginal Posterior and Prior Distributions"
+  )
 ```
 
+There are so many exciting things to discuss here. I have opted to plot samples from both the posterior and prior distributions, so we can appreciate how the data worked to update our prior beliefs to posterior distributions.
 
+The first thing to notice is that the parameters for which we selected very narrow priors, i.e. $top$ and $bottom$, nothing has changed. The data is not enough to overwhelm the strong priors and the posterior is mostly informed by the prior.
 
-```{r}
-p <- samples %>%
+On the other hand, the data has provided enough information to concentrate the probability density to a much narrower interval for the three remaining parameters. The posterior median for $log_{10}(IC_{50})$ is very close to the truth. $nH$ is a bit more uncertain, but most of the probability is concentrated well above one, which correctly suggests cooperatively binding ligands.
+
+```{r parameter_summary_example_1}
+post_summaries <- rstan::summary(
+  post,
+  pars = c("bottom", "top", "log_IC50", "nH", "sigma"),
+  probs = c(0.055, 0.5, 0.945)
+)$summary
+
+tibble::as_tibble(post_summaries) %>% 
+  dplyr::select(c("5.5%", "50%", "94.5%")) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  knitr::kable()
+```
+
+At this point, we can draw a conclusion for our experiment: Given our model assumptions, data strongly suggests cooperatively binding kinetics with a 89% compatibility interval for $log_{10}(IC_{50})$ at about $[-5.73, -5.44]$. We could run another experiment with using this much narrower range for $log_{10}(IC_{50})$ as a prior and for determining ligand concentrations to test, as that interval is likely to contain the s-shaped part of the Hill curve.
+
+Speaking of the Hill curve, let's see what our posterior predictions look like for the tissue response as a function of log ligand concentration.
+
+```{r posterior_predictive_example_1}
+posterior_samples %>%
   tidyr::expand_grid(log_conc = seq(-3, -9, length.out = 50)) %>% 
   dplyr::mutate(tissue_response = purrr::pmap_dbl(
     list(log_conc, bottom, top, log_IC50, nH),
@@ -380,57 +432,114 @@ p <- samples %>%
     response_lower = quantile(tissue_response, probs = 0.055)
   ) %>%
   ggplot() +
-  geom_ribbon(aes(x = log_conc, ymin = response_lower, ymax = response_upper, fill = "89% interval"), alpha = 0.5) +
+  geom_ribbon(
+    aes(
+      x = log_conc,
+      ymin = response_lower,
+      ymax = response_upper,
+      fill = "89% interval"
+    ),
+    alpha = 0.5
+  ) +
   geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
+  geom_point(
+    data = tibble::tibble(
+      log_conc = study_1_concentrations,
+      observations = study_1_observations
+    ),
+    aes(x = log_conc, y = observations, colour = "Observations")
+  ) +
+  geom_function(
+    fun = hill_function,
+    args = study_1_params[-5],
+    mapping = aes(colour = "True tissue response")
+  ) +
+  scale_colour_manual(values = c(
+    "Posterior mean" = colour$blue_dark,
+    "Observations" = colour$orange_light,
+    "True tissue response" = colour$orange_dark
+  )) +
+  labs(
+    y = "Tissue response",
+    x = "Log ligand concentration [M]",
+    colour = "",
+    fill = ""
+  ) +
+  scale_fill_manual(values = c("89% interval" = colour$azure)) +
   theme_minimal()
-
-p + geom_point(data = tibble::tibble(log_conc = example_1_concentrations, observations = example_1_observations), aes(x = log_conc, y = observations, colour = "Observations")) + geom_function(fun = hill_function, args = example_1_params[-5], mapping = aes(colour = "True tissue response")) + scale_colour_manual(values = c("Posterior mean" = colour$blue_dark, "Observations" = colour$orange_light, "True tissue response" = colour$orange_dark)) + labs(y = "Tissue response", x = "Log ligand concentration [M]", colour = "", fill = "") + scale_fill_manual(values = c("89% interval" = colour$azure))
 ```
 
+The true tissue response is all contained in the 89% interval for the posterior predicted response, despite noisy observations and despite the fact that 5 out of 6 observations lie outside the s-shaped part of the curve.
 
-### Example 2: New Drug
+However, it also seems that we got lucky and had an observation very close to the true $log_{10}(IC_{50})$. This point quite clearly provides a an anchor for the entire model. We might not always be this lucky. In that case, however, the posterior marginal distributions for the kinetic parameters would just be much more informed by the priors, in turn telling us that we should perform more experiments.
 
-In this example, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess potency, $IC_{50}$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. We do not expect the kinetics to change and we know that the ligands bind independently, i.e. $n_H = 0$.
+### Study 2: New Drug
 
-```{r example_2_sim}
-example_2_params <- list(
-  bottom = 0,
-  top = 0.8,
+In this study, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess its potency, $IC_{50}$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. We do not expect the kinetics to change and we know that the ligands bind independently, i.e. $n_H = 1$.
+
+```{r study_2_sim}
+study_2_params <- list(
+  bottom = 0.2,
+  top = 1,
   log_IC50 = -5.6,
   nH = 1,
   sigma = 0.1
 )
 ```
 
+#### A model for study 2
 
-## Prior and Prior Sampling
+We are still assuming the same kinetics for the tissue response as in study 1.
 
-### Example 1
+$$y_i \sim {\sf Normal}(\mu_i, \sigma)$$
 
-Prior predictive check using tidyverse
+$$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
 
+Our assumptions about the $top$ parameter are the same as in study 1.
 
-### Example 2
+$$top \sim {\sf Normal}(1, 0.01)$$
 
-$$top \sim {\sf Normal}(1, 0.05)$$
+In this case, we have produced a variant of the endogenous ligand. The most likely scenario is that our modification causes the ligand to lose efficacy such that the minimum tissue response is somewhere between 0 and 1. However, there is a small chance that our superior design yields a ligand that is more efficacious than the endogenous ligand and thus has a minimum response below 0. Our prior for the $bottom$ parameter should thus be concentrated between 0 and 1 but with some probability less than 0. I have opted for a normal prior.
 
-$$bottom \sim {\sf Normal}(0, 0.5)$$
+Note that this prior puts some probability in the scenario where the $bottom$ parameter is larger than the $top$ parameter. This is not consistent with our domain knowledge and it is a challenge that we will handle in a moment.
+
+$$bottom \sim {\sf Normal}(0.25, 0.25)$$
+
+Changing the ligand will not change the receptor, so it is extremely unlikely that the Hill coefficient changes.
 
 $$n_H \sim {\sf Normal}(1, 0.01)$$
 
+The modified ligand is likely to lose potency compared to the endogenous ligand, but we might get lucky and see an increase. I have opted for the same flat prior as in the previous study.
+
 $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
+
+Noise is expected to be quite severe.
 
 $$\sigma \sim {\sf Exp}(10)$$
 
+#### Prior predictive check with Stan
 
-Prior sampling using Stan
+As in the previous study, we should check that the prior predictive distribution conforms to expectations as given by our domain expertise.
+
+This time I have opted to utilise Stan to sample from the priors. It is a bit of extra work, but it scales well for larger and more complex models.
+
+One challenge we have, is the constraint that $top \ge bottom$. A way to handle this could be to discard any samples that violates the constraint and replace them with new samples until the desired number of samples are obtained. I would like something a bit more elegant.
+
+In Stan, constraints can be set on parameters, and during the run of the algorithm that samples from the posterior, those constraints are enforced. However, when we want to use random number generators to sample from the prior distributions, we have to enforce it ourselves. I have implemented a small Stan program to sample from the priors in study 2:
+
+```{r study_2_prior_program}
+writeLines(readLines("hill_equation_study_2_prior.stan"))
+```
+
+Note that there is no `model` block in the code. This program should not run a Monte Carlo simulation. Rather, it should just pull samples from the prior distributions. This can be accomplished with Stan's Fixed Parameter mode.
+
 ```{r prior_2_stan, message=FALSE}
-N <- 50
-log_conc <- seq(-9, -3, length.out = N)
+n_prior_samples <- 50
+log_conc <- seq(-9, -3, length.out = n_prior_samples)
 
 prior <- rstan::stan(
-  "hill_equation_example_2_prior.stan",
-  data = list(N = N, log_conc = log_conc),
+  "hill_equation_study_2_prior.stan",
+  data = list(N = n_prior_samples, log_conc = log_conc),
   algorithm = "Fixed_param",
   chains = 1,
   iter = 100,
