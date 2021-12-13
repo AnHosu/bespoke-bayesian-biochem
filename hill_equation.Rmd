@@ -296,7 +296,7 @@ Now we are almost ready to fit the model. To do so, I have implemented it in Sta
 
 Here is the Stan model that corresponds to the model described above.
 
-```{r stan_model_example_1}
+```{r stan_model_study_1}
 writeLines(readLines("hill_equation_study_1.stan"))
 ```
 
@@ -328,7 +328,7 @@ data_list <- list(
 )
 
 # This compiles the model and samples from the posterior
-post <- rstan::stan(
+study_1_post <- rstan::stan(
   "hill_equation_study_1.stan",
   data = data_list,
   chains = 4,
@@ -344,7 +344,7 @@ Recall that the underlying research question was the kinetics of the tissue resp
 
 ```{r posterior_marginals_example_1}
 # Extract samples from the posterior distribution
-posterior_samples <- rstan::extract(post) %>% 
+posterior_samples <- rstan::extract(study_1_post) %>% 
   tibble::as_tibble() %>%
   dplyr::select(bottom, top, log_IC50, nH, sigma)
 
@@ -403,7 +403,7 @@ On the other hand, the data has provided enough information to concentrate the p
 
 ```{r parameter_summary_example_1}
 post_summaries <- rstan::summary(
-  post,
+  study_1_post,
   pars = c("bottom", "top", "log_IC50", "nH", "sigma"),
   probs = c(0.055, 0.5, 0.945)
 )$summary
@@ -475,13 +475,13 @@ However, it also seems that we got lucky and had an observation very close to th
 
 ### Study 2: New Drug
 
-In this study, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess its potency, $IC_{50}$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. We do not expect the kinetics to change and we know that the ligands bind independently, i.e. $n_H = 1$.
+In this study, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess its potency, $log_{10}(IC_{50})$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. The tissue response to the endogenous ligand is well characterised, so we know that the ligands bind independently, i.e. $n_H = 1$, and we know that for the endogenous ligand $log_{10}(IC_{50}) = -7.2$.
 
 ```{r study_2_sim}
 study_2_params <- list(
   bottom = 0.2,
   top = 1,
-  log_IC50 = -5.6,
+  log_IC50 = -7.6,
   nH = 1,
   sigma = 0.1
 )
@@ -509,9 +509,9 @@ Changing the ligand will not change the receptor, so it is extremely unlikely th
 
 $$n_H \sim {\sf Normal}(1, 0.01)$$
 
-The modified ligand is likely to lose potency compared to the endogenous ligand, but we might get lucky and see an increase. I have opted for the same flat prior as in the previous study.
+The modified ligand is likely to lose potency, i.e. have a higher $log_{10}(IC_{50})$, compared to the endogenous ligand which has $log_{10}(IC_{50}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a narrower prior than in study 1.
 
-$$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
+$$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 0.7)$$
 
 Noise is expected to be quite severe.
 
@@ -533,7 +533,7 @@ writeLines(readLines("hill_equation_study_2_prior.stan"))
 
 Note that there is no `model` block in the code. This program should not run a Monte Carlo simulation. Rather, it should just pull samples from the prior distributions. This can be accomplished with Stan's Fixed Parameter mode.
 
-```{r prior_2_stan, message=FALSE}
+```{r prior_2_stan, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
 n_prior_samples <- 50
 log_conc <- seq(-9, -3, length.out = n_prior_samples)
 
@@ -543,7 +543,8 @@ prior <- rstan::stan(
   algorithm = "Fixed_param",
   chains = 1,
   iter = 100,
-  warmup = 0
+  warmup = 0,
+  seed = 4444
 )
 
 samples <- rstan::extract(prior)
@@ -555,25 +556,208 @@ sample_readings <- lapply(1:100, function(i) {
 ) %>% 
   geom_line(mapping = aes(x, y), colour = colour$blue_dark, alpha = 0.5)
 })
-p <- ggplot() + theme_minimal() + labs(x = "Ligand concentration [M]" , y = "Prior assay response")
+p <- ggplot() + 
+  theme_minimal() +
+  labs(x = "Ligand concentration [M]" , y = "Prior assay response")
 Reduce(`+`, sample_readings, init = p)
 ```
 
+We expect most potential curves to reach 50% of their minimum response well above -7.2, corresponding to lost potency. There is, however, still a small chance of increased potency, i.e. a value smaller than -7.2. Likewise for the minimum response, we find it most likely that a modification will cause the minimum response to be somewhere between 0 and 1, yet there is a chance that the minimum response is less than zero.
 
+All in all, these seem like suitable priors, but we also note that the amount of noise could severely impact conclusions.
 
-## Estimate
-```{r estimate}
+#### Building a Stan model for study 2
 
+Here is the Stan model that corresponds to the model described above. Note that we do not need to specify our own distribution functions to satisfy constraints. When running the simulation, Stan keeps track of constraints and makes sure that they are satisfied.
+
+```{r study_2_post_program}
+writeLines(readLines("hill_equation_study_2_post.stan"))
 ```
 
+#### Fitting study 2
 
+Now we can simulate some observations and fit the model. As we do not expect our modified ligand to stray too far from the curve of the endogenous ligan, we generate observations in a narrow space of ligand concentration, from $log_{10}([A_i]) = -7.5$ to $log_{10}([A_i]) = -4.5$. To make it a challenge, we will generate just 6 observations.
 
+As for study 1, I am drawing 1000 samples per chain from the posterior.
 
-## Chain Diagnostics
+```{r post_study_2, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
+n_observations <- 6
+n_posterior_samples <- 1e3
 
-## Model Evaluation
+# Determine the log concentrations at which to simulate
+study_2_concentrations <- seq(-7.5, -4.5, length.out = n_observations)
+
+# Simulate observations using our 'secret' parameters
+study_2_observations <- rlang::exec(
+  assay_response,
+  study_2_concentrations,
+  !!!study_2_params
+)
+
+# Everything the model needs to know
+data_list <- list(
+  N = n_observations,
+  log_conc = study_2_concentrations,
+  y = study_2_observations
+)
+
+# This compiles the model and samples from the posterior
+study_2_post <- rstan::stan(
+  "hill_equation_study_2_post.stan",
+  data = data_list,
+  chains = 4,
+  iter = n_posterior_samples * 2,
+  warmup = n_posterior_samples,
+  seed = 4444
+)
+```
+
+The underlying research question for this study was primarily concerned with the $log_{10}(IC_{50})$ and $bottom$ parameters. So more than the actual tissue response, we are interested in the marginal posterior distributions for these two parameters. Let's start by summarising the marginal posterior distributions.
+
+```{r posterior_marginals_study_2}
+study_2_priors <- function(n) {
+  tibble::tibble(
+    top = rnorm(n, 1, 0.01),
+    bottom = rnorm(n, 0.25, 0.25),
+    nH = rnorm(n, 1, 0.01),
+    log_IC50 = rnorm(n, -6, 0.7),
+    sigma = rexp(n, 10)
+  )
+}
+
+# Extract samples from the posterior distribution
+posterior_samples <- rstan::extract(study_2_post) %>% 
+  tibble::as_tibble() %>%
+  dplyr::select(bottom, top, log_IC50, nH, sigma)
+
+# True parameters of the simulation.
+parameter_tibble <- study_2_params %>%
+  tibble::as_tibble() %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "truth"
+  )
+
+# Plot each of the marginal distributions, comparing prior, posterior, and true
+#  simulation parameters
+posterior_samples %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  dplyr::left_join(parameter_tibble, by = "parameter") %>%
+  ggplot() +
+  geom_histogram(
+    data = tidyr::pivot_longer(
+      study_2_priors(nrow(posterior_samples)),
+      dplyr::everything(),
+      names_to = "parameter",
+      values_to = "sample"
+    ),
+    mapping = aes(x = sample, fill = "Prior"),
+    bins = 50,
+    alpha = 0.5
+  ) +
+  geom_histogram(aes(x = sample, fill = "Posterior"), bins = 50, alpha = 0.5) +
+  geom_vline(aes(xintercept = truth, colour = "truth"), alpha = 0.5) +
+  facet_wrap(~ parameter, scales = "free") +
+  theme_minimal() +
+  scale_colour_manual(values = c("truth" = colour$orange_light)) +
+  scale_fill_manual(
+    values = c("Prior" = colour$azure, "Posterior" = colour$blue_dark)
+  ) +
+  labs(
+    y = "Posterior sample count",
+    x = "",
+    colour = "",
+    fill = "",
+    title = "Marginal Posterior and Prior Distributions"
+  )
+```
+
+The first thing to notice here is that the posterior probability mass is more concentrated than the prior. However, the marginal posterior distributions for $log_{10}(IC_{50})$ and $bottom$ are still relatively wide. Recall that a difference of one in $log_{10}(IC_{50})$ is an order of magnitude in terms of concentration. Small changes in potency matter a lot if we have to manufacture the compound at one point. So our data did not tell us much about the precise potency and efficacy of this modified ligand.
+
+On the other hand, the posterior probability mass is mostly at $log_{10}(IC_{50}) < -7.2$ and $bottom > 0$, i.e. we are quite certain that our modified ligand has higher potency than the endogenous ligand but elicits a smaller response. With well defined priors and a small amount of data, we have a perfectly good screening experiment.
+
+If we were interested in gaining a better understanding of the modified ligand, we could perform more experiments and get those posterior probability mass even more concentrated. We also see that the true noise of the assay is quite high; reducing it might help to better learn the underlying tissue response.
+
+```{r parameter_summary_study_2}
+post_summaries <- rstan::summary(
+  study_2_post,
+  pars = c("bottom", "top", "log_IC50", "nH", "sigma"),
+  probs = c(0.055, 0.5, 0.945)
+)$summary
+
+tibble::as_tibble(post_summaries) %>% 
+  dplyr::select(c("5.5%", "50%", "94.5%")) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  knitr::kable()
+```
+
+At this point, we can draw a conclusion for our experiment: Given our model assumptions, data strongly suggests that the modified ligand has higher potency than the endogenous ligand with a 89% credibility interval for $log_{10}(IC_{50})$ at about $[-7.71, -7.23]$. We also conclude that the modified ligand has less efficacy than the endogenous ligand with a 89% credibility interval for $bottom$ at about $[0.085, 0.22]$
+
+Before accepting the conclusion, it is a good idea to look at the posterior predictions and compare them to the data.
+
+```{r posterior_predictive_study_2}
+posterior_samples %>%
+  tidyr::expand_grid(log_conc = seq(-3, -9, length.out = 50)) %>% 
+  dplyr::mutate(tissue_response = purrr::pmap_dbl(
+    list(log_conc, bottom, top, log_IC50, nH),
+    hill_function
+  )) %>%
+  dplyr::group_by(log_conc) %>%
+  dplyr::summarise(
+    response_mean = mean(tissue_response),
+    response_upper = quantile(tissue_response, probs = 0.945),
+    response_lower = quantile(tissue_response, probs = 0.055)
+  ) %>%
+  ggplot() +
+  geom_ribbon(
+    aes(
+      x = log_conc,
+      ymin = response_lower,
+      ymax = response_upper,
+      fill = "89% interval"
+    ),
+    alpha = 0.5
+  ) +
+  geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
+  geom_point(
+    data = tibble::tibble(
+      log_conc = study_2_concentrations,
+      observations = study_2_observations
+    ),
+    aes(x = log_conc, y = observations, colour = "Observations")
+  ) +
+  geom_function(
+    fun = hill_function,
+    args = study_2_params[-5],
+    mapping = aes(colour = "True tissue response")
+  ) +
+  scale_colour_manual(values = c(
+    "Posterior mean" = colour$blue_dark,
+    "Observations" = colour$orange_light,
+    "True tissue response" = colour$orange_dark
+  )) +
+  labs(
+    y = "Tissue response",
+    x = "Log ligand concentration [M]",
+    colour = "",
+    fill = ""
+  ) +
+  scale_fill_manual(values = c("89% interval" = colour$azure)) +
+  theme_minimal()
+```
+
+The true tissue response is all contained in the 89% interval for the posterior predicted response, despite noisy observations and despite the fact that 4 out of 6 observations lie outside the s-shaped part of the curve.
+
+## Diagnosing Fits
 
 ### Comparing with another fitting method
+
+
 
 ## Mistakes Were Made...
 

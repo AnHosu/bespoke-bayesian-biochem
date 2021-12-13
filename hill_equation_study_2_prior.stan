@@ -5,7 +5,6 @@ functions {
     real y = mu + sigma * inv_Phi(u);
     return y;
   }
-  
   real normal_upper_rng(real mu, real sigma, real upper_bound) {
     real p_upper_bound = normal_cdf(upper_bound, mu, sigma);
     real u = uniform_rng(0, p_upper_bound);
@@ -13,7 +12,6 @@ functions {
     return y;
   }
 }
-
 data {
   int<lower=0> N;
   vector[N] log_conc;
@@ -22,7 +20,7 @@ generated quantities{
   real<lower = 0> nH = normal_lower_rng(1, 0.01, 0);
   real top = normal_rng(1, 0.01);
   real bottom = normal_upper_rng(0.25, 0.25, top);
-  real log_IC50 = normal_rng(-6, 1.5);
+  real log_IC50 = normal_rng(-6, 0.7);
   real sigma = exponential_rng(10);
   vector[N] mu;
   vector[N] y;
