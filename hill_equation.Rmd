@@ -321,7 +321,7 @@ study_1_observations <- rlang::exec(
 )
 
 # Everything the model needs to know
-data_list <- list(
+study_1_data_list <- list(
   N = n_observations,
   log_conc = study_1_concentrations,
   y = study_1_observations
@@ -330,7 +330,7 @@ data_list <- list(
 # This compiles the model and samples from the posterior
 study_1_post <- rstan::stan(
   "hill_equation_study_1.stan",
-  data = data_list,
+  data = study_1_data_list,
   chains = 4,
   iter = n_posterior_samples * 2,
   warmup = n_posterior_samples,
@@ -753,10 +753,100 @@ posterior_samples %>%
 
 The true tissue response is all contained in the 89% interval for the posterior predicted response, despite noisy observations and despite the fact that 4 out of 6 observations lie outside the s-shaped part of the curve.
 
-## Diagnosing Fits
+## Assessing posterior quality
 
-### Comparing with another fitting method
+During the two studies, I avoided a rather important subject, namely assessing the quality of our posterior estimate / mcmc run
 
+Posterior predictive shows that predictions are reasonable
+
+All is not perfectly well
+
+```{r}
+rstan::check_divergences(study_1_post)
+```
+
+This means that some 
+
+[Stan is noisy](https://mc-stan.org/misc/warnings.html#runtime-warnings)
+
+Includes ways to diagnose. In addition to the above, chains mixing
+
+```{r}
+rstan::traceplot(study_1_post, alpha = 0.5)
+```
+
+What about those divergent transitions?
+
+Increasing `adapt_delta` as suggested by Stan will help avoid the divergent transitions, but why were they there in the first place?
+
+Let's look at some diagnostic parameters for the posterior in the first study
+
+```{r}
+post_summaries <- rstan::summary(
+  study_1_post,
+  pars = c("bottom", "top", "log_IC50", "nH", "sigma"),
+  probs = c(0.055, 0.5, 0.945)
+)$summary
+
+tibble::as_tibble(post_summaries) %>% 
+  dplyr::select(c("n_eff", "Rhat")) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  knitr::kable()
+```
+
+n_eff is an estimate of the number of independent samples from the posterior
+Rhat is a measure of convergence. Values $\hat{R} > 1.01$ indicate that convergence has not entirely been reached.
+
+According to the diagnostics, the marginal posterior for $n_H$ has been challenging to estimate.
+
+Not surprising, considering that we only have one good point on the s-shaped part of the curve. There is very little information to sample from.
+
+Why does increasing `adapt_delta` work? Intuitively, it causes Stan to pick a smaller step size for the underlying hmc sampler, which reduces the chance that the sample ends up in a far off part of parameter space where gradients are extreme. For larger models, one might have to do more samples to fully explore the posterior.
+
+```{r}
+study_1_post_improved <- rstan::stan(
+  "hill_equation_study_1.stan",
+  data = study_1_data_list,
+  chains = 4,
+  iter = n_posterior_samples * 2,
+  warmup = n_posterior_samples,
+  seed = 4444,
+  control = list(adapt_delta = 0.95)
+)
+```
+
+That should improve the situation
+
+```{r}
+rstan::check_divergences(study_1_post_improved)
+```
+
+Let's also have a look at the diagnostics
+
+```{r}
+post_summaries <- rstan::summary(
+  study_1_post,
+  pars = c("bottom", "top", "log_IC50", "nH", "sigma"),
+  probs = c(0.055, 0.5, 0.945)
+)$summary
+
+tibble::as_tibble(post_summaries) %>% 
+  dplyr::select(c("n_eff", "Rhat")) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  knitr::kable()
+```
+
+There is so much more to discuss about diagnosing HMC. `?rstan::check_hmc_diagnostics` is a great place to start.
+
+### Comparing to another fitting method
+
+```{r}
+mod <- nls(
+  y ~ top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH)),
+  data = study_1_data_list,
+  start = list(bottom = 0, top = 1, log_IC50 = -6, nH = 1)
+)
+```
 
 
 ## Mistakes Were Made...
@@ -766,10 +856,6 @@ Forgetting priors
 Sampling values beyond the bound with rng
 
 Phi vs inv_Phi
-
-```{r}
-1 + 0.5*qnorm(runif(1000, pnorm(0, 1, 0.5), 1))
-```
 
 
 ## References {-}
