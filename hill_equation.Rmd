@@ -32,13 +32,13 @@ linkcolor: blue
 knitr::opts_chunk$set(comment=NA)
 ```
 
-I am on a quest to improve the model fitting I do on biochemical assays. For  some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput. I have been using classical machine learning techniques and generic fitting and optimisation functions to interpret data from such assays. While this approach works, it also neglects much of the available domain expertise. Many of the underlying biochemical mechanisms are known and I would like my models to take that into account so I get results that are more directly interpretable in the context of the hypothesis that required the assay in the first place. In other words, I want a bespoke model.
+I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput. I have been using classical machine learning techniques and generic fitting and optimisation functions to interpret data from such assays. While this approach works, it also neglects much of the available domain expertise. Many of the underlying biochemical mechanisms are known and I would like my models to take that into account so I get results that are more directly interpretable in the context of the hypothesis that required the assay in the first place. In other words, I want a bespoke model.
 
-I am developing the bespoke model one minimally viable step at a time. In this study, I am building a Bayesian model for biochemical assays where the underlying data generating process is the Hill equation for tissue responses [@Neubig597].
+I will be developing the bespoke model one minimally viable step at a time. In this study, I am building a Bayesian model for biochemical assays where the underlying data generating process is the Hill equation for tissue responses [@Neubig597]. I will then test the model in two simulated example studies.
 
 I was inspired to write this study after reading the chapter "Generalized Linear Madness" in the book Statistical Rethinking by R. McElreath [@McElreath:2016] and the writings of M. Betancourt [@Betancourt:2019]. For an introduction to bespoke Bayesian models, I highly recommend these resources.
 
-We will build the Bayesian models in Stan and make use of the Rstan interface to extract posterior samples. For data wrangling and visualisation, we will use the Tidyverse.
+If you are following along, we will build the Bayesian models in Stan and make use of the Rstan interface to extract posterior samples. For data wrangling and visualisation, we will use the Tidyverse.
 ```{r utilities, message=FALSE}
 library(ggplot2)
 library(magrittr)
@@ -54,10 +54,10 @@ colour <- list(
 )
 ```
 
-## Generative Model
-Real data is great, but it also presents a plethora of challenges like formatting and cleaning that add nothing but obfuscation of our core challenge, the model development. To avoid spending time on auxiliary data issues and to better understand modelling choices and their consequences, we will simulate the data generating process.
+# Domain Expertise
+Before we start coding a model or even looking at any data, let's formally discuss the biochemical domain experitise.
 
-### Hill Equation
+## Hill Equation
 When a ligand, e.g. a drug, is an antagonist to a receptor that causes some tissue response, the strength of that response, $\mu_i$, declines with increased concentration of that ligand, $[A_i]$. The response is known to follow the Hill Equation [@Neubig597].
 
 $$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i]))^{n_H}}}$$
@@ -129,10 +129,10 @@ tibble::tibble(
   theme_minimal()
 ```
 
-### From Domain Expertise to Probabilistic Model
+## From Domain Expertise to Probabilistic Model
 With the basic domain knowledge in place, we are ready to start thinking about the assay in terms of probability distributions.
 
-The first expression relates our observed assay responses, $y_i$, to the true underlying tissue response, $\mu_i$. Given repeat observations, the assay response should average to the tissue response and the variance should be small and finite, so it is not too far a strech to think of the assay response as a sample from a normal distribution.
+The first expression relates our observed assay responses, $y_i$, to the true underlying tissue response, $\mu_i$. Given repeat observations, the assay response should average to the tissue response and the variance should be small and finite, so it is not too far a stretch to think of the assay response as a sample from a normal distribution.
 
 $$y_i \sim {\sf Normal}(\mu_i, \sigma)$$
 
@@ -144,13 +144,13 @@ $$\mu_i = top - \frac{bottom - top}{1 + 10^{(\log_{10}(IC_{50}) - \log_{10}([A_i
 
 These two expressions define our observational model or likelihood function. Next, we need to specify our prior model, and this is where domain expertise comes in handy.
 
-The prior model needs to have prior assumptions and corresponding distributions for each parameter in the model. The parameters that need priors are $IC_{50}$, $bottom$, $top$, $n_H$, and $\sigma$. $\mu_i$ is an unobserved variable - it is a deterministic function of the model parameters and our variable $[A_i]$ - so it does not need a prior.
+The prior model needs to have prior assumptions and corresponding distributions for each parameter in the model. The parameters that need priors are $IC_{50}$, $bottom$, $top$, $n_H$, and $\sigma$. $\mu_i$ is an unobserved variable - it is a deterministic function of the model parameters and our variable, $[A_i]$, so it does not need a prior.
 
 The priors will always have to be specific to the assay at hand. In this study, we are not considering a real assay, but will be simulating instead. Even so, we can still discuss general prior strategies for parameters of the model, in the light of our general knowledge about the biochemical processes. Later, when we start simulating, we can lock in specific priors.
 
 Let's consider each parameter in turn, starting with $n_H$.
 
-#### A prior for the Hill coefficient
+### A prior for the Hill coefficient
 
 The Hill coefficient will in many cases be well known. For instance, if the receptor that causes the tissue response is known to have only one binding site for the ligand, it extremely unlikely that we will observe any cooperative or competitive kinetics. When each ligand binds an individual receptor, the binding should be independent, regardless of the nature of the ligand. Hence, in theory, $n_H = 1$ and we can assign a narrow prior, say 
 
@@ -162,7 +162,7 @@ In case we encountered a response with cooperative binding, we would just move t
 
 We know one more thing though. The Hill coefficient cannot be less than zero, as that would change the kinetics of the system. With the narrow prior around 1 $n_H = 1$ it is not really an issue, as there is virtually no probability mass below 0, but for kinetics with diminishing returns, an exponential prior or a half-normal distribution may be preferable.
 
-#### A prior for the maximum tissue response
+### A prior for the maximum tissue response
 
 When discussing the $top$ and $bottom$ parameters, it is worth discussing assay technique. Even though the assay is performed *in vitro*, the subject, e.g. tissue, receptor, or enzyme, is often a biological construct and thus likely to exhibit batch variation. Furthermore, the raw assay reading carries no particular meaning. Instead, we employ controls to get a normalised response. For instance, we might use a bit of buffer as a negative control and assign the corresponding response to 1 and, at the other end, we might use a known strongly binding ligand as a positive control and assign the corresponding response to 0. The raw readings are then normalised between these two controls to yield the assay response, $y_i$.
 
@@ -170,7 +170,7 @@ Back to the maximum response. In most contexts, the maximum response is not all 
 
 In terms of probabilities, it means that we have very strong prior knowledge about the maximum response. We could allow it to vary a bit, but I assert that is would not offer much utility.
 
-#### A prior for the minimum tissue response
+### A prior for the minimum tissue response
 
 The minimum response, $bottom$, is much more interesting, as it represents the greatest effect a ligand can have on a tissue response. Analogous to the negative control, we set the response of a positive control to 0. However, we cannot necessarily fix the minimum response at this point.
 
@@ -178,21 +178,21 @@ Imagine an assay where we are testing a chemical compound, in the hope of identi
 
 What does this mean in terms of a prior? It means that screening experiments require a relatively wide prior for the $bottom$ parameter; we only know that it should be less than $top$ and that it is unlikely to be much smaller than 0. However, if we are studying the kinetics of the system and we have a known strong ligand as positive control, we can choose a much narrower prior around 0.
 
-#### A prior for potency
+### A prior for potency
 
 Deciding on a prior for $IC_{50}$ is difficult for two reasons. If we are screening new compounds, we might have no idea about the potency of the compound or whether it even has potency at all. Secondly, $IC_{50}$ is a concentration and the tissue response depends on the ligand concentration relative to this concentration. In other words, it is the magnitude of the potency that matters.
 
 The way to handle this is by thinking of a prior for $\log_{10}(IC_{50})$ instead. Units matter, but if we use Molar concentration then $\log_{10}(IC_{50}) = -9$ would correspond to an extremely potent ligand and $\log_{10}(IC_{50}) = 0$ would correspond to extremely low potency.
 
-#### A prior for experiment noise
+### A prior for experiment noise
 
 Hopefully, the experiment noise is minimal. Consider $\sigma = 0.1$. Since we expect most readings to fall in the 0 to 1 range, this noise level translates to 95% of assay responses being within +-20% of the tissue response. This might be a lot or it might be what is expected from a biological assay, but the point is that, as long as we normalise the assay responses, this parameter should be easy to reason about. For instance, $\sigma$ can never be less than zero, and if it is higher than 0.5, then the assay is more noise than signal.
 
-## Examples
+# Example Studies
 
 Let's move on to some simulated studies
 
-### Study 1: Exploring Kinetics
+## Study 1: Exploring Kinetics
 
 In this study we are imagining a situation where we are trying to learn more about the kinetics of a tissue response. We are investigating a receptor to which we have a known strongly binding antagonist. We suspect that the receptor has multiple binding sites and that ligand binding is not independent. We also do not know the potency, $IC_{50}$, of the antagonist, but we know that maximum tissue response is observed at $[A_i] > 10^{-3}$.
 
@@ -208,7 +208,7 @@ study_1_params <- list(
 )
 ```
 
-#### A model for study 1
+### A model for study 1
 
 Before performing the experiment, i.e. simulating observations, we should take some time to reflect on our domain expertise and translate it into a bespoke probabilistic model for this particular scenario.
 
@@ -240,7 +240,7 @@ Finally, we should consider how noisy our observations might be. We have little 
 
 $$\sigma \sim {\sf Exp}(10)$$
 
-#### Prior predictive check in Tidyverse
+### Prior predictive check in Tidyverse
 
 With the model specified, my hands are itching to start fitting. That would be a poor idea, though. Before fitting, we should verify that the model as a whole conforms to our domain knowledge. Even though we have chosen what we think are reasonable priors, it it difficult to get an intuition about how all those priors interact. However, since the model is probabilistic and generative, we can sample predictions from it without fitting anything first. If the distribution of those prior predictions agree with our expectations, then we are good to go.
 
@@ -290,7 +290,7 @@ This looks much like the curves we would expect from a real assay. Extreme conce
 
 I initially set the prior for $n_H$ way too wide, resulting in many extreme responses. That does not comply with domain knowledge, so I shrunk the prior. 
 
-#### Building a Stan model for study 1
+### Building a Stan model for study 1
 
 Now we are almost ready to fit the model. To do so, I have implemented it in Stan. There are other excellent introductions to Stan, see the [Stan User Guide](https://mc-stan.org/docs/2_28/stan-users-guide/index.html) or some of the references below.
 
@@ -300,9 +300,9 @@ Here is the Stan model that corresponds to the model described above.
 writeLines(readLines("hill_equation_study_1.stan"))
 ```
 
-#### Fitting study 1
+### Fitting study 1
 
-Now we can simulate some observations and fit the model. To make the simulation realistic, we generate observations in a wide space of ligand concentration, from $log_{10}([A_i]) = -9$ to $log_{10}([A_i]) = -3$. To make it a challenge, we will generate just 6 observations.
+Now we can simulate some observations and fit the model. To make the simulation realistic, we generate observations in a wide space of ligand concentration, from $\log_{10}([A_i]) = -9$ to $\log_{10}([A_i]) = -3$. To make it a challenge, we will generate just 6 observations.
 
 Fitting our bespoke Bayesian model amounts to sampling from the posterior distribution. Here I am drawing 1000 samples per chain from the posterior. This is not a large model, so we could easily sample a lot more if we wanted.
 
@@ -399,7 +399,7 @@ There are so many exciting things to discuss here. I have opted to plot samples 
 
 The first thing to notice is that the parameters for which we selected very narrow priors, i.e. $top$ and $bottom$, nothing has changed. The data is not enough to overwhelm the strong priors and the posterior is mostly informed by the prior.
 
-On the other hand, the data has provided enough information to concentrate the probability density to a much narrower interval for the three remaining parameters. The posterior median for $log_{10}(IC_{50})$ is very close to the truth. $nH$ is a bit more uncertain, but most of the probability is concentrated well above one, which correctly suggests cooperatively binding ligands.
+On the other hand, the data has provided enough information to concentrate the probability density to a much narrower interval for the three remaining parameters. The posterior median for $\log_{10}(IC_{50})$ is very close to the truth. $nH$ is a bit more uncertain, but most of the probability is concentrated well above one, which correctly suggests cooperatively binding ligands.
 
 ```{r parameter_summary_example_1}
 post_summaries <- rstan::summary(
@@ -414,12 +414,12 @@ tibble::as_tibble(post_summaries) %>%
   knitr::kable()
 ```
 
-At this point, we can draw a conclusion for our experiment: Given our model assumptions, data strongly suggests cooperatively binding kinetics with a 89% compatibility interval for $log_{10}(IC_{50})$ at about $[-5.73, -5.44]$. We could run another experiment with using this much narrower range for $log_{10}(IC_{50})$ as a prior and for determining ligand concentrations to test, as that interval is likely to contain the s-shaped part of the Hill curve.
+At this point, we can draw a conclusion for our experiment: Given our model assumptions, data strongly suggests cooperatively binding kinetics with a 89% compatibility interval for $\log_{10}(IC_{50})$ at about $[-5.73, -5.44]$. We could run another experiment with using this much narrower range for $\log_{10}(IC_{50})$ as a prior and for determining ligand concentrations to test, as that interval is likely to contain the s-shaped part of the Hill curve.
 
 Speaking of the Hill curve, let's see what our posterior predictions look like for the tissue response as a function of log ligand concentration.
 
 ```{r posterior_predictive_example_1}
-posterior_samples %>%
+study_1_post_pred <- posterior_samples %>%
   tidyr::expand_grid(log_conc = seq(-3, -9, length.out = 50)) %>% 
   dplyr::mutate(tissue_response = purrr::pmap_dbl(
     list(log_conc, bottom, top, log_IC50, nH),
@@ -454,11 +454,6 @@ posterior_samples %>%
     args = study_1_params[-5],
     mapping = aes(colour = "True tissue response")
   ) +
-  scale_colour_manual(values = c(
-    "Posterior mean" = colour$blue_dark,
-    "Observations" = colour$orange_light,
-    "True tissue response" = colour$orange_dark
-  )) +
   labs(
     y = "Tissue response",
     x = "Log ligand concentration [M]",
@@ -467,15 +462,21 @@ posterior_samples %>%
   ) +
   scale_fill_manual(values = c("89% interval" = colour$azure)) +
   theme_minimal()
+study_1_post_pred +
+  scale_colour_manual(values = c(
+    "Posterior mean" = colour$blue_dark,
+    "Observations" = colour$orange_light,
+    "True tissue response" = colour$orange_dark
+  ))
 ```
 
 The true tissue response is all contained in the 89% interval for the posterior predicted response, despite noisy observations and despite the fact that 5 out of 6 observations lie outside the s-shaped part of the curve.
 
-However, it also seems that we got lucky and had an observation very close to the true $log_{10}(IC_{50})$. This point quite clearly provides a an anchor for the entire model. We might not always be this lucky. In that case, however, the posterior marginal distributions for the kinetic parameters would just be much more informed by the priors, in turn telling us that we should perform more experiments.
+However, it also seems that we got lucky and had an observation very close to the true $\log_{10}(IC_{50})$. This point quite clearly provides a an anchor for the entire model. We might not always be this lucky. In that case, however, the posterior marginal distributions for the kinetic parameters would just be much more informed by the priors, in turn telling us that we should perform more experiments.
 
-### Study 2: New Drug
+## Study 2: New Drug
 
-In this study, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess its potency, $log_{10}(IC_{50})$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. The tissue response to the endogenous ligand is well characterised, so we know that the ligands bind independently, i.e. $n_H = 1$, and we know that for the endogenous ligand $log_{10}(IC_{50}) = -7.2$.
+In this study, we imagine that we are developing a new potential drug candidate. As a part of the development process, we have produced a modified version of an endogenous ligand and we are looking to assess its potency, $\log_{10}(IC_{50})$, and efficacy, $bottom$. We are able to approximate the tissue response in an *in vitro* assay, but it involves complex biochemistry, so noisy measurements are to be expected. The tissue response to the endogenous ligand is well characterised, so we know that the ligands bind independently, i.e. $n_H = 1$, and we know that for the endogenous ligand $\log_{10}(IC_{50}) = -7.2$.
 
 ```{r study_2_sim}
 study_2_params <- list(
@@ -487,7 +488,7 @@ study_2_params <- list(
 )
 ```
 
-#### A model for study 2
+### A model for study 2
 
 We are still assuming the same kinetics for the tissue response as in study 1.
 
@@ -509,7 +510,7 @@ Changing the ligand will not change the receptor, so it is extremely unlikely th
 
 $$n_H \sim {\sf Normal}(1, 0.01)$$
 
-The modified ligand is likely to lose potency, i.e. have a higher $log_{10}(IC_{50})$, compared to the endogenous ligand which has $log_{10}(IC_{50}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a narrower prior than in study 1.
+The modified ligand is likely to lose potency, i.e. have a higher $\log_{10}(IC_{50})$, compared to the endogenous ligand which has $\log_{10}(IC_{50}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a narrower prior than in study 1.
 
 $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 0.7)$$
 
@@ -517,7 +518,7 @@ Noise is expected to be quite severe.
 
 $$\sigma \sim {\sf Exp}(10)$$
 
-#### Prior predictive check with Stan
+### Prior predictive check with Stan
 
 As in the previous study, we should check that the prior predictive distribution conforms to expectations as given by our domain expertise.
 
@@ -566,7 +567,7 @@ We expect most potential curves to reach 50% of their minimum response well abov
 
 All in all, these seem like suitable priors, but we also note that the amount of noise could severely impact conclusions.
 
-#### Building a Stan model for study 2
+### Building a Stan model for study 2
 
 Here is the Stan model that corresponds to the model described above. Note that we do not need to specify our own distribution functions to satisfy constraints. When running the simulation, Stan keeps track of constraints and makes sure that they are satisfied.
 
@@ -574,9 +575,9 @@ Here is the Stan model that corresponds to the model described above. Note that 
 writeLines(readLines("hill_equation_study_2_post.stan"))
 ```
 
-#### Fitting study 2
+### Fitting study 2
 
-Now we can simulate some observations and fit the model. As we do not expect our modified ligand to stray too far from the curve of the endogenous ligan, we generate observations in a narrow space of ligand concentration, from $log_{10}([A_i]) = -7.5$ to $log_{10}([A_i]) = -4.5$. To make it a challenge, we will generate just 6 observations.
+Now we can simulate some observations and fit the model. As we do not expect our modified ligand to stray too far from the curve of the endogenous ligan, we generate observations in a narrow space of ligand concentration, from $\log_{10}([A_i]) = -7.5$ to $\log_{10}([A_i]) = -4.5$. To make it a challenge, we will generate just 6 observations.
 
 As for study 1, I am drawing 1000 samples per chain from the posterior.
 
@@ -612,7 +613,7 @@ study_2_post <- rstan::stan(
 )
 ```
 
-The underlying research question for this study was primarily concerned with the $log_{10}(IC_{50})$ and $bottom$ parameters. So more than the actual tissue response, we are interested in the marginal posterior distributions for these two parameters. Let's start by summarising the marginal posterior distributions.
+The underlying research question for this study was primarily concerned with the $\log_{10}(IC_{50})$ and $bottom$ parameters. So more than the actual tissue response, we are interested in the marginal posterior distributions for these two parameters. Let's start by summarising the marginal posterior distributions.
 
 ```{r posterior_marginals_study_2}
 study_2_priors <- function(n) {
@@ -677,9 +678,9 @@ posterior_samples %>%
   )
 ```
 
-The first thing to notice here is that the posterior probability mass is more concentrated than the prior. However, the marginal posterior distributions for $log_{10}(IC_{50})$ and $bottom$ are still relatively wide. Recall that a difference of one in $log_{10}(IC_{50})$ is an order of magnitude in terms of concentration. Small changes in potency matter a lot if we have to manufacture the compound at one point. So our data did not tell us much about the precise potency and efficacy of this modified ligand.
+The first thing to notice here is that the posterior probability mass is more concentrated than the prior. However, the marginal posterior distributions for $\log_{10}(IC_{50})$ and $bottom$ are still relatively wide. Recall that a difference of one in $\log_{10}(IC_{50})$ is an order of magnitude in terms of concentration. Small changes in potency matter a lot if we have to manufacture the compound at one point. So our data did not tell us much about the precise potency and efficacy of this modified ligand.
 
-On the other hand, the posterior probability mass is mostly at $log_{10}(IC_{50}) < -7.2$ and $bottom > 0$, i.e. we are quite certain that our modified ligand has higher potency than the endogenous ligand but elicits a smaller response. With well defined priors and a small amount of data, we have a perfectly good screening experiment.
+On the other hand, the posterior probability mass is mostly at $\log_{10}(IC_{50}) < -7.2$ and $bottom > 0$, i.e. we are quite certain that our modified ligand has higher potency than the endogenous ligand but elicits a smaller response. With well defined priors and a small amount of data, we have a perfectly good screening experiment.
 
 If we were interested in gaining a better understanding of the modified ligand, we could perform more experiments and get those posterior probability mass even more concentrated. We also see that the true noise of the assay is quite high; reducing it might help to better learn the underlying tissue response.
 
@@ -696,7 +697,7 @@ tibble::as_tibble(post_summaries) %>%
   knitr::kable()
 ```
 
-At this point, we can draw a conclusion for our experiment: Given our model assumptions, data strongly suggests that the modified ligand has higher potency than the endogenous ligand with a 89% credibility interval for $log_{10}(IC_{50})$ at about $[-7.71, -7.23]$. We also conclude that the modified ligand has less efficacy than the endogenous ligand with a 89% credibility interval for $bottom$ at about $[0.085, 0.22]$
+At this point, we can draw a conclusion for our experiment: Given our model assumptions, data strongly suggests that the modified ligand has higher potency than the endogenous ligand with a 89% credibility interval for $\log_{10}(IC_{50})$ at about $[-7.71, -7.23]$. We also conclude that the modified ligand has less efficacy than the endogenous ligand with a 89% credibility interval for $bottom$ at about $[0.085, 0.22]$
 
 Before accepting the conclusion, it is a good idea to look at the posterior predictions and compare them to the data.
 
@@ -753,33 +754,23 @@ posterior_samples %>%
 
 The true tissue response is all contained in the 89% interval for the posterior predicted response, despite noisy observations and despite the fact that 4 out of 6 observations lie outside the s-shaped part of the curve.
 
-## Assessing posterior quality
+Assessing posterior quality
 
-During the two studies, I avoided a rather important subject, namely assessing the quality of our posterior estimate / mcmc run
+During the two studies, I avoided a rather important subject, namely assessing the quality of our posterior estimate. The algorithm that explores and samples from the posterior, Hamiltonian Monte Carlo (HMC), is as much a part of the Bayesian model as priors and as such should enjoy the same deliberate consideration.
 
-Posterior predictive shows that predictions are reasonable
+We have observed that posterior predictive distribution yields reasonable predictions, which gives us a lot of confidence in the distributions. In these studies, we could also compare the predictions to the true underlying parameters of the simulations, so we know that the model is at least somewhat right.
 
-All is not perfectly well
+All is not perfectly well, however. In study one, Stan complains that during the HMC run there were divergent transitions:
 
 ```{r}
 rstan::check_divergences(study_1_post)
 ```
 
-This means that some 
+[Stan is noisy](https://mc-stan.org/misc/warnings.html#runtime-warnings) and will complain when something seems wrong in the HMC sampler.  
 
-[Stan is noisy](https://mc-stan.org/misc/warnings.html#runtime-warnings)
+In this case, it is divergent transitions which usually happens when an iteration ends up in a part of parameter space where the probabilities have large gradients.
 
-Includes ways to diagnose. In addition to the above, chains mixing
-
-```{r}
-rstan::traceplot(study_1_post, alpha = 0.5)
-```
-
-What about those divergent transitions?
-
-Increasing `adapt_delta` as suggested by Stan will help avoid the divergent transitions, but why were they there in the first place?
-
-Let's look at some diagnostic parameters for the posterior in the first study
+Increasing `adapt_delta` as suggested by Stan will help avoid the divergent transitions, but why were they there in the first place? Let's look at some diagnostic parameters for the posterior in the first study:
 
 ```{r}
 post_summaries <- rstan::summary(
@@ -794,14 +785,15 @@ tibble::as_tibble(post_summaries) %>%
   knitr::kable()
 ```
 
-n_eff is an estimate of the number of independent samples from the posterior
-Rhat is a measure of convergence. Values $\hat{R} > 1.01$ indicate that convergence has not entirely been reached.
+`n_eff` is an estimate of the number of independent samples from the posterior. `Rhat` is a measure of convergence. Values $\hat{R} > 1.01$ indicate that convergence has not entirely been reached.
 
-According to the diagnostics, the marginal posterior for $n_H$ has been challenging to estimate.
+According to the diagnostics, the marginal posterior for $n_H$ has been challenging to estimate. This is not altogether surprising, considering that we only have one good point on the s-shaped part of the curve.
 
-Not surprising, considering that we only have one good point on the s-shaped part of the curve. There is very little information to sample from.
+Imagine the situation where we are considering a value of $\log_{10}(IC_{50})$ that is very close to the data point that is on the s-shaped part of the curve. The most likely curve that satisfies this extra constraint is close to a step function, i.e. has a very large $n_H$, but this is very unlikely, according to our priors. Hence, traversing the corresponding distribution for $n_H$ is going to be difficult.
 
-Why does increasing `adapt_delta` work? Intuitively, it causes Stan to pick a smaller step size for the underlying hmc sampler, which reduces the chance that the sample ends up in a far off part of parameter space where gradients are extreme. For larger models, one might have to do more samples to fully explore the posterior.
+So why does increasing `adapt_delta` work? Intuitively, it causes Stan to pick a smaller step size for the HMC sampler. This reduces the chance that the sample ends up in a far off part of parameter space where gradients are extreme. The trade-off is that the posterior might be less efficiently sampled, so for larger models, one might have to do more samples to fully explore the posterior.
+
+Let's try running study one with an increased `adapt_delta`.
 
 ```{r}
 study_1_post_improved <- rstan::stan(
@@ -815,17 +807,17 @@ study_1_post_improved <- rstan::stan(
 )
 ```
 
-That should improve the situation
+That should improve the situation.
 
 ```{r}
 rstan::check_divergences(study_1_post_improved)
 ```
 
-Let's also have a look at the diagnostics
+Indeed it did!. Let's also have a look at the diagnostics.
 
 ```{r}
 post_summaries <- rstan::summary(
-  study_1_post,
+  study_1_post_improved,
   pars = c("bottom", "top", "log_IC50", "nH", "sigma"),
   probs = c(0.055, 0.5, 0.945)
 )$summary
@@ -836,32 +828,63 @@ tibble::as_tibble(post_summaries) %>%
   knitr::kable()
 ```
 
-There is so much more to discuss about diagnosing HMC. `?rstan::check_hmc_diagnostics` is a great place to start.
+The numbers have improved and we have more faith in the posterior samples. Remember though that having good diagnostics alone does not imply a good model. The diagnostic check should be combined with prior and posterior predictive checks to ensure that the model is reasonable.
 
-### Comparing to another fitting method
+There is so much more to discuss about diagnosing HMC - we have barely scratched the surface here. `?rstan::check_hmc_diagnostics` is a great place to start, if you want to learn more.
+
+## Comparing to another fitting method
+
+Before wrapping up, I'd like to return to my initial goal, which was to squeeze more information out of the data I get from biochemical assays.
+
+At this point, all we have done is fit a model to two experiments of six data points each and, despite the assistance from Stan, it has taken more code and more computation than a 'classic' fit would have. So was it worth it? Let's compare.
+
+Here I am fitting the data from study one using non-linear least squares. To make it fair, I have put in as much information as the opimisation algorithm allows: the initial guess is at the median of the priors we set for study one and the parameters are constrained to the 95% prior interval.
 
 ```{r}
 mod <- nls(
   y ~ top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH)),
   data = study_1_data_list,
-  start = list(bottom = 0, top = 1, log_IC50 = -6, nH = 1)
+  algorithm = "port",
+  start = list(bottom = 0, top = 1, log_IC50 = -6, nH = 1),
+  lower = list(bottom = -0.02, top = 0.98, log_IC50 = -9, nH = 0),
+  upper = list(bottom = 0.02, top = 1.02, log_IC50 = -3, nH = 100)
 )
+
+study_1_post_pred +
+  geom_function(
+    fun = hill_function,
+    args = mod$m$getPars(),
+    mapping = aes(colour = "NLS fit")
+  ) +
+  scale_colour_manual(values = c(
+    "Posterior mean" = colour$blue_dark,
+    "Observations" = colour$orange_light,
+    "True tissue response" = colour$orange_dark,
+    "NLS fit" = "black"
+  ))
+
 ```
 
+The NLS fit is obviously close to the true tissue response and it took much less code and time to fit. Compared to our Bayesian model, the NLS fit is not bad. In fact, it will be useful in many cases, but there are a few notable differences.
 
-## Mistakes Were Made...
+With the Bayesian model, we get an estimate of the amount of noise in the experiment, in addition to the parameters of the Hill equation. Such an estimate can be very useful for understanding and continuous improvement of the biochemical assays.
 
-Forgetting priors
+With the Bayesian model, we also get marginal posterior distributions. With a regular fit, we only get a point estimate for each parameter and any uncertainty is lost. We do not always need anything but a point estimate to answer our hypotheses, but the marginal posterior distributions can be useful in future experimental design and as priors for the next experiment.
 
-Sampling values beyond the bound with rng
+Finally there is an added robustness. Biological data has all sorts of weird behaviour. In a situation where the data points are all over the place, due to some unknown external factor, the resulting Bayesian model would show little or no change from the prior model, whereas the NLS model would fail altogether. So with a Bayesian model, we can rely on probabilities to tell us when an experiment is an outlier.
 
-Phi vs inv_Phi
+At the end of the day, the chosen method depends on the downstream application of the parameters and the hypotheses that we are trying to answer with the data. For now, I am keeping both in my toolbox, but I am seeing increased usefulness for the Bayesian approach, especially in screening experiments.
 
+# Next Steps
 
-## References {-}
+In the preceding two studies, we spent a lot of time fuzzing over just a few data points. In real applications, however, data is often more abundant and more diverse. I am thinking of screening experiments, in particular. In screening experiments, one might test a large number of potential ligands at once, meaning that there is more data but also more behaviour to be captured.
+
+In my next study, I will be discussing development of a bespoke Bayesian model for high-throughput biochemical screening assays. Stay tuned!
+
+# References {-}
 
 <div id="refs"></div>
 
-## License
+# License
 
 The content of this project itself is licensed under the [Creative Commons Attribution-ShareAlike 4.0 International license](https://creativecommons.org/licenses/by-sa/4.0/), and the underlying code is licensed under the [GNU General Public License v3.0 license](https://github.com/AnHosu/bespoke-bayesian-biochem/blob/main/LICENSE).
