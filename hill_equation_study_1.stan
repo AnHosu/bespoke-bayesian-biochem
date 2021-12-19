@@ -1,7 +1,7 @@
 data {
-  int<lower=0> N;
-  vector[N] log_conc;
-  vector[N] y;
+  int<lower=0> N; // Number of observations
+  vector[N] log_conc; // Tested concentration on log10 scale
+  vector[N] y; // Normalised assay responses
 }
 parameters {
   real bottom;
