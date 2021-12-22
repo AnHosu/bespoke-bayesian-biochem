@@ -2,26 +2,6 @@
 title: "Bespoke Bayesian Model for Biochemical Assays"
 author: "Anders Ellegaard"
 date: '2021-11-20'
-slug: bespoke-biochem-one
-categories: []
-tags:
-- Bayesian data analysis
-- Bayesian statistics
-- R
-- Stan
-- Statistics
-- Modeling
-- Biochemistry
-subtitle: ''
-summary: Developing a bespoke Bayesian model for fitting the Hill equation in 
-  biochemical assays
-lastmod: '2021-11-17T20:33:36+01:00'
-featured: no
-image:
-  caption: ''
-  focal_point: ''
-  preview_only: yes
-projects: []
 bibliography: references.bib
 csl: citation_style.csl
 link-citations: yes
@@ -847,7 +827,7 @@ Before wrapping up, I'd like to return to my initial goal, which was to squeeze 
 
 At this point, all we have done is fit a model to two experiments of six data points each and, despite the assistance from Stan, it has taken more code and more computation than a 'classic' fit would have. So was it worth it? Let's compare.
 
-Here I am fitting the data from study one using non-linear least squares. To make it fair, I have put in as much information as the opimisation algorithm allows: the initial guess is at the median of the priors we set for study one and the parameters are roughly constrained to the 95% prior interval.
+Here I am fitting the data from study one using non-linear least squares. To make it fair, I have put in as much information as the optimisation algorithm allows: the initial guess is at the median of the priors we set for study one and the parameters are roughly constrained to the 95% prior interval.
 
 ```{r}
 mod <- nls(
