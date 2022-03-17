@@ -35,6 +35,8 @@ set.seed(4444)
 
 # Generative Process
 
+We produce modifications to the endogenous ligand which has known parameters logIC50 = 7.2 and
+
 ```{r generative_model}
 hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
   top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH))
@@ -81,6 +83,49 @@ Reduce(`+`, true_curves[1:10], init = p)
 ```
 
 
+
+
+# Model
+
+In our screening assay, we will consider $M$ compounds $j = 1, ..., M$. For each compound, we measure an assay response, $y_{ij}$, for a number of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_ij$, but that observations are noisy:
+
+$$y_{ij} \sim {\sf Normal}(\mu_{ij}, \sigma)$$
+
+Note that the noise parameter, $\sigma$, is the same for all $M$ compounds.
+
+The tissue response is a deterministic function of four kinetic parameters, as described by the Hill equation:
+
+$$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_{ij}]))^{n_H}}}$$
+
+
+
+# Priors
+
+For $top$, $n_H$, and $\sigma$, we can use the same priors as when we fit one curve.
+
+$$top \sim {\sf Normal}(1, 0.01)$$
+$$n_H \sim {\sf LogNormal}(0, 1)$$
+
+$$\sigma \sim {\sf Exp}(10)$$
+
+We now have multiple $bottom_i$ parameters to consider.
+
+As in study 2 in the previous post, we know that the most likely scenario is where our modification causes the ligand to lose efficacy yielding a minimum tissue response somewhere between 0 and 1. However, there is a small chance that our superior design yields a ligand that is more efficacious than the endogenous ligand and thus has a minimum response below 0. Our prior for the $bottom$ parameter should thus be concentrated between 0 and 1 but with some probability below 0. I have opted for a normal prior.
+
+The question remaining is whether this argument is true for all $bottom_i$. I am going to assume that it is and use the same prior for all $bottom_i$.
+
+$$bottom_i \sim {\sf Normal}(0.25, 0.25)$$
+
+The modified ligand is likely to lose potency, i.e. have a higher $\log_{10}(IC_{50,i})$, compared to the endogenous ligand which has $\log_{10}(IC_{50,i}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a somewhat narrow prior. Again, we will use the same prior for all $\log_{10}(IC_{50,i})$:
+
+$$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
+
+## Prior Predictive Simulation
+
+We should control that we have chosen sensible priors with a prior predictive check. So let's imagine that we perform the screening experiment, sampling the underlying parameters from our prior distributions, and have a look at the hypothetical observations that would arise.
+
+Let's go ahead and define a function for sampling a screening experiment.
+
 ```{r generative_model2}
 screening_experiment <- function(log_conc,
                                  n_compounds = NULL,
@@ -114,27 +159,9 @@ screening_experiment <- function(log_conc,
 observations <- screening_experiment(log_conc = assay_window, parameters = true_parameters)
 ```
 
-# Model
-
-In our screening assay, we will consider $M$ compounds $j = 1, ..., M$. For each compound, we measure an assay response, $y_{ij}$, for a number of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_ij$, but that observations are noisy:
-
-$$y_{ij} \sim {\sf Normal}(\mu_{ij}, \sigma)$$
-
-Note that the noise parameter, $\sigma$, is the same for all $M$ compounds.
-
-The tissue response is a deterministic function of four kinetic parameters, as described by the Hill equation:
-
-$$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_{ij}]))^{n_H}}}$$
-
-
-
-# Priors
-
-## Prior Predictive Simulation
+Now we can do our prior predictive check by performing a hypothetical with our priors
 
 ```{r}
-
-
 priors <- list(
   bottom_mean <- 0.25,
   bottom_sd <- 0.25,
@@ -147,7 +174,6 @@ priors <- list(
   sigma_rate <- 10
 )
 
-
 rlang::exec(
   screening_experiment,
   log_conc = assay_window,
@@ -155,9 +181,7 @@ rlang::exec(
   !!!priors
 ) %>% 
   ggplot(aes(x = log_conc, y = response, group = compound)) +
-    geom_line()
-
-
+    geom_line(colour = colour$blue_dark, alpha = 0.5)
 ```
 
 ```{r}
