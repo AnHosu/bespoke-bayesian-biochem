@@ -1,0 +1,182 @@
+---
+title: "Bespoke Bayesian Model for High Throughput Biochemical Assays"
+author: "Anders Ellegaard"
+date: '2021-12-30'
+bibliography: references.bib
+csl: citation_style.csl
+link-citations: yes
+linkcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment=NA)
+```
+
+I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput.
+
+In [a previous study]({{< relref "/project/bespoke-biochem-one" >}})
+
+```{r utilities, message=FALSE}
+library(ggplot2)
+library(magrittr)
+
+options(mc.cores = parallel::detectCores())
+
+colour <- list(
+  orange_dark = "#fb8500",
+  orange_light = "#ffb703",
+  blue_dark = "#023047",
+  azure = "#219ebc",
+  blue_light = "#8ecae6"
+)
+
+set.seed(4444)
+```
+
+# Generative Process
+
+```{r generative_model}
+hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
+  top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH))
+}
+
+assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
+  noise <- rnorm(length(log_conc), 0, sigma)
+  hill_function(log_conc, bottom, top, log_IC50, nH) + noise
+}
+
+n_compounds <- 100
+assay_window <- seq(-9, -3, length.out = 6)
+
+true_parameters <- tibble::tibble(
+  compound = seq(1, n_compounds),
+  bottom = 1 - rlnorm(n_compounds, -0.25, 0.125),
+  log_IC50 = rnorm(n_compounds, -7, 0.5),
+  top = 0.99,
+  nH = 1.01,
+  sigma = 0.15
+)
+
+true_curves <- purrr::pmap(
+  true_parameters,
+  ~ geom_function(
+    fun = hill_function,
+    args = list(
+      top = ..4,
+      bottom = ..2,
+      nH = ..5,
+      log_IC50 = ..3
+    ),
+    colour = colour$blue_dark,
+    alpha = 0.5
+  )
+)
+
+p <- ggplot() +
+  xlim(-9, -3) +
+  theme_minimal() +
+  labs(x = "Ligand concentration [M]" , y = "True tissue response")
+
+Reduce(`+`, true_curves[1:10], init = p)
+```
+
+
+```{r generative_model2}
+screening_experiment <- function(log_conc,
+                                 n_compounds = NULL,
+                                 bottom_mean = NULL,
+                                 bottom_sd = NULL,
+                                 top_mean = NULL,
+                                 top_sd = NULL,
+                                 log_IC50_mean = NULL,
+                                 log_IC50_sd = NULL,
+                                 nH_meanlog = NULL,
+                                 nH_sdlog = NULL,
+                                 sigma_rate = NULL,
+                                 parameters = NULL) {
+  if (is.null(parameters)) {
+    parameters <- tibble::tibble(
+      compound = seq(1, n_compounds),
+      bottom = rnorm(n_compounds, bottom_mean, bottom_sd),
+      log_IC50 = rnorm(n_compounds, log_IC50_mean, log_IC50_sd),
+      top = rnorm(1, top_mean, top_sd),
+      nH = rlnorm(1, nH_meanlog, nH_sdlog),
+      sigma = rexp(1, sigma_rate)
+    )
+  }
+  parameters %>% 
+    tidyr::expand_grid(log_conc = log_conc) %>%
+    dplyr::mutate(
+      response = assay_response(log_conc, bottom, top, log_IC50, nH, sigma)
+    )
+}
+
+observations <- screening_experiment(log_conc = assay_window, parameters = true_parameters)
+```
+
+# Model
+
+In our screening assay, we will consider $M$ compounds $j = 1, ..., M$. For each compound, we measure an assay response, $y_{ij}$, for a number of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_ij$, but that observations are noisy:
+
+$$y_{ij} \sim {\sf Normal}(\mu_{ij}, \sigma)$$
+
+Note that the noise parameter, $\sigma$, is the same for all $M$ compounds.
+
+The tissue response is a deterministic function of four kinetic parameters, as described by the Hill equation:
+
+$$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_{ij}]))^{n_H}}}$$
+
+
+
+# Priors
+
+## Prior Predictive Simulation
+
+```{r}
+
+
+priors <- list(
+  bottom_mean <- 0.25,
+  bottom_sd <- 0.25,
+  top_mean <- 1,
+  top_sd <- 0.025,
+  log_IC50_mean <- -6,
+  log_IC50_sd <- 0.7,
+  nH_meanlog <- 0,
+  nH_sdlog <- 0.01,
+  sigma_rate <- 10
+)
+
+
+rlang::exec(
+  screening_experiment,
+  log_conc = assay_window,
+  n_compounds = 50,
+  !!!priors
+) %>% 
+  ggplot(aes(x = log_conc, y = response, group = compound)) +
+    geom_line()
+
+
+```
+
+```{r}
+data <- list(
+  N = nrow(experiment$observations),
+  M = max(experiment$observations$curve),
+  curve_ind = experiment$observations$curve,
+  log_conc = experiment$observations$log_conc,
+  y = experiment$observations$response
+)
+
+post <- rstan::stan(
+  file = "hill_equation_screening.stan",
+  data = data,
+  chains = 4,
+  cores = 4,
+  seed = 4444
+)
+
+posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
+```
+
