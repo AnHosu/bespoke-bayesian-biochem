@@ -124,23 +124,20 @@ $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
 
 We should control that we have chosen sensible priors with a prior predictive check. So let's imagine that we perform the screening experiment, sampling the underlying parameters from our prior distributions, and have a look at the hypothetical observations that would arise.
 
-Let's go ahead and define a function for sampling a screening experiment.
+Let's go ahead and define a function for sampling our priors and simulating a screening experiment.
 
 ```{r generative_model2}
-screening_experiment <- function(log_conc,
-                                 n_compounds = NULL,
-                                 bottom_mean = NULL,
-                                 bottom_sd = NULL,
-                                 top_mean = NULL,
-                                 top_sd = NULL,
-                                 log_IC50_mean = NULL,
-                                 log_IC50_sd = NULL,
-                                 nH_meanlog = NULL,
-                                 nH_sdlog = NULL,
-                                 sigma_rate = NULL,
-                                 parameters = NULL) {
-  if (is.null(parameters)) {
-    parameters <- tibble::tibble(
+prior_parameters <- function(n_compounds = NULL,
+                             bottom_mean = NULL,
+                             bottom_sd = NULL,
+                             top_mean = NULL,
+                             top_sd = NULL,
+                             log_IC50_mean = NULL,
+                             log_IC50_sd = NULL,
+                             nH_meanlog = NULL,
+                             nH_sdlog = NULL,
+                             sigma_rate = NULL) {
+  tibble::tibble(
       compound = seq(1, n_compounds),
       bottom = rnorm(n_compounds, bottom_mean, bottom_sd),
       log_IC50 = rnorm(n_compounds, log_IC50_mean, log_IC50_sd),
@@ -148,18 +145,18 @@ screening_experiment <- function(log_conc,
       nH = rlnorm(1, nH_meanlog, nH_sdlog),
       sigma = rexp(1, sigma_rate)
     )
-  }
+}
+
+screening_experiment <- function(parameters, log_conc) {
   parameters %>% 
     tidyr::expand_grid(log_conc = log_conc) %>%
     dplyr::mutate(
       response = assay_response(log_conc, bottom, top, log_IC50, nH, sigma)
     )
 }
-
-observations <- screening_experiment(log_conc = assay_window, parameters = true_parameters)
 ```
 
-Now we can do our prior predictive check by performing a hypothetical with our priors
+Now we can do our prior predictive check by performing a hypothetical experiment with our priors
 
 ```{r}
 priors <- list(
@@ -174,23 +171,42 @@ priors <- list(
   sigma_rate <- 10
 )
 
+
 rlang::exec(
-  screening_experiment,
-  log_conc = assay_window,
+  prior_parameters,
   n_compounds = 50,
   !!!priors
-) %>% 
+) %>%
+  screening_experiment(log_conc = seq(-10, -2, length.out = 100)) %>%
   ggplot(aes(x = log_conc, y = response, group = compound)) +
-    geom_line(colour = colour$blue_dark, alpha = 0.5)
+    geom_line(colour = colour$blue_dark, alpha = 0.5) +
+    theme_minimal() +
+    labs(
+    x = "log ligand concentration",
+    y = "response",
+    title = "Prior Samples"
+    )
+```
+# Stan Model
+
+```{r stan_model}
+writeLines(readLines("hill_equation_screening.stan"))
 ```
 
+# Fitting
+
 ```{r}
+observations <- screening_experiment(
+  parameters = true_parameters,
+  log_conc = assay_window
+)
+
 data <- list(
-  N = nrow(experiment$observations),
-  M = max(experiment$observations$curve),
-  curve_ind = experiment$observations$curve,
-  log_conc = experiment$observations$log_conc,
-  y = experiment$observations$response
+  N = nrow(observations),
+  M = max(observations$compound),
+  curve_ind = observations$compound,
+  log_conc = observations$log_conc,
+  y = observations$response
 )
 
 post <- rstan::stan(
@@ -200,7 +216,153 @@ post <- rstan::stan(
   cores = 4,
   seed = 4444
 )
-
-posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
 ```
 
+# Examining the Posterior
+
+## Posterior Marginal Distributions
+
+```{r posterior_marginals_shared, fig.dim=c(8, 4), out.width="90%"}
+# Extract samples from the posterior distribution
+posterior_samples <- rstan::extract(post) %>% 
+  tibble::as_tibble() %>%
+  dplyr::select(top, nH, sigma)
+
+# True parameters of the simulation.
+truth <- true_parameters %>%
+  dplyr::slice_head(n = 1) %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "truth"
+  )
+
+prior_samples <- replicate(
+  nrow(posterior_samples),
+  rlang::exec(
+    prior_parameters,
+    n_compounds = 1,
+    !!!priors
+  ),
+  simplify = FALSE
+) %>% 
+  dplyr::bind_rows() %>%
+  dplyr::select(top, nH, sigma) %>% 
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  )
+
+# Plot each of the marginal distributions, comparing prior, posterior, and true
+#  simulation parameters
+posterior_samples %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  dplyr::left_join(truth, by = "parameter") %>%
+  ggplot() +
+  geom_histogram(
+    data = prior_samples,
+    mapping = aes(x = sample, fill = "Prior"),
+    bins = 50,
+    alpha = 0.5
+  ) +
+  geom_histogram(aes(x = sample, fill = "Posterior"), bins = 50, alpha = 0.5) +
+  geom_vline(aes(xintercept = truth, colour = "truth"), alpha = 0.5) +
+  facet_wrap(~ parameter, scales = "free") +
+  theme_minimal() +
+  scale_colour_manual(values = c("truth" = colour$orange_light)) +
+  scale_fill_manual(values = c(
+    "Prior" = colour$azure,
+    "Posterior" = colour$blue_dark
+  )) +
+  labs(
+    y = "Posterior sample count",
+    x = "",
+    colour = "",
+    fill = "",
+    title = "Marginal Posterior and Prior Distributions"
+  )
+```
+
+```{r posterior_marginals_compounds, fig.dim=c(8, 4), out.width="90%"}
+compounds <- 3:7
+
+# Extract samples from the posterior distribution
+posterior_samples <- rstan::extract(post) %>% 
+  tibble::as_tibble() %>%
+  dplyr::select(bottom, log_IC50)
+
+# True parameters of the simulation.
+truth <- true_parameters %>%
+  dplyr::filter(compound %in% compounds) %>%
+  tidyr::pivot_longer(
+    -compound,
+    names_to = "parameter",
+    values_to = "truth"
+  )
+
+prior_samples <- replicate(
+  nrow(posterior_samples),
+  rlang::exec(
+    prior_parameters,
+    n_compounds = 1,
+    !!!priors
+  ),
+  simplify = FALSE
+) %>% 
+  dplyr::bind_rows() %>%
+  dplyr::select(bottom, log_IC50) %>% 
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  tidyr::expand_grid(compound = compounds)
+
+# Plot each of the marginal distributions, comparing prior, posterior, and true
+#  simulation parameters
+lapply(compounds, function(i) {
+  tibble::tibble(
+    bottom = posterior_samples$bottom[,i],
+    log_IC50 = posterior_samples$log_IC50[,i],
+    compound = i
+  )
+}) %>% 
+  dplyr::bind_rows() %>%
+  tidyr::pivot_longer(
+    -compound,
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  dplyr::left_join(truth, by = c("parameter", "compound")) %>%
+  ggplot() +
+  geom_histogram(
+    data = prior_samples,
+    mapping = aes(x = sample, fill = "Prior"),
+    bins = 50,
+    alpha = 0.5
+  ) +
+  geom_histogram(aes(x = sample, fill = "Posterior"), bins = 50, alpha = 0.5) +
+  geom_vline(aes(xintercept = truth, colour = "truth"), alpha = 0.5) +
+  facet_grid(rows = vars(compound), cols = vars(parameter), scales = "free") +
+  theme_minimal() +
+  theme(strip.text.y = element_text(angle = 0)) +
+  scale_colour_manual(values = c("truth" = colour$orange_light)) +
+  scale_fill_manual(values = c(
+    "Prior" = colour$azure,
+    "Posterior" = colour$blue_dark
+  )) +
+  labs(
+    y = "Posterior sample count",
+    x = "",
+    colour = "",
+    fill = "",
+    title = "Marginal Posterior and Prior Distributions"
+  )
+```
+
+## Posterior 
