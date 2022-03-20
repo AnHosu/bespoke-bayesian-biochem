@@ -216,6 +216,9 @@ post <- rstan::stan(
   cores = 4,
   seed = 4444
 )
+
+# Extract samples from the posterior distribution
+posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
 ```
 
 # Examining the Posterior
@@ -223,11 +226,6 @@ post <- rstan::stan(
 ## Posterior Marginal Distributions
 
 ```{r posterior_marginals_shared, fig.dim=c(8, 4), out.width="90%"}
-# Extract samples from the posterior distribution
-posterior_samples <- rstan::extract(post) %>% 
-  tibble::as_tibble() %>%
-  dplyr::select(top, nH, sigma)
-
 # True parameters of the simulation.
 truth <- true_parameters %>%
   dplyr::slice_head(n = 1) %>%
@@ -237,6 +235,8 @@ truth <- true_parameters %>%
     values_to = "truth"
   )
 
+# A number of draws from our priors to match the number of draws we have from
+#  the posterior
 prior_samples <- replicate(
   nrow(posterior_samples),
   rlang::exec(
@@ -257,6 +257,7 @@ prior_samples <- replicate(
 # Plot each of the marginal distributions, comparing prior, posterior, and true
 #  simulation parameters
 posterior_samples %>%
+  dplyr::select(top, nH, sigma) %>%
   tidyr::pivot_longer(
     dplyr::everything(),
     names_to = "parameter",
@@ -288,13 +289,22 @@ posterior_samples %>%
   )
 ```
 
+```{r posterior_summary_shared_params}
+post_summaries <- rstan::summary(
+  post,
+  pars = c("top", "nH", "sigma"),
+  probs = c(0.055, 0.5, 0.945)
+)$summary
+
+tibble::as_tibble(post_summaries) %>%
+  dplyr::select(-c(mean, se_mean, sd)) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  knitr::kable()
+```
+
+
 ```{r posterior_marginals_compounds, fig.dim=c(8, 4), out.width="90%"}
 compounds <- 3:7
-
-# Extract samples from the posterior distribution
-posterior_samples <- rstan::extract(post) %>% 
-  tibble::as_tibble() %>%
-  dplyr::select(bottom, log_IC50)
 
 # True parameters of the simulation.
 truth <- true_parameters %>%
@@ -305,6 +315,8 @@ truth <- true_parameters %>%
     values_to = "truth"
   )
 
+# A number of draws from our priors to match the number of draws we have from
+#  the posterior
 prior_samples <- replicate(
   nrow(posterior_samples),
   rlang::exec(
@@ -365,4 +377,99 @@ lapply(compounds, function(i) {
   )
 ```
 
-## Posterior 
+```{r posterior_summary_compund_params}
+post_summaries <- rstan::summary(
+  post,
+  pars = c("bottom", "log_IC50"),
+  probs = c(0.055, 0.5, 0.945)
+)$summary
+
+tibble::as_tibble(post_summaries) %>%
+  dplyr::select(-c(mean, se_mean, sd)) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  dplyr::arrange(desc(Rhat)) %>%
+  dplyr::slice_head(n = 5) %>%
+  knitr::kable()
+```
+
+## Posterior Predictive
+
+```{r posterior_predictive_study_2, fig.dim=c(8, 4), out.width="90%"}
+example_curve <- 1
+post_pred <- posterior_samples %>%
+  dplyr::mutate(
+    log_IC50 = log_IC50[, example_curve],
+    bottom = bottom[, example_curve]
+  ) %>%
+  tidyr::expand_grid(log_conc = seq(-3, -9, length.out = 50)) %>% 
+  dplyr::mutate(tissue_response = purrr::pmap_dbl(
+    list(log_conc, bottom, top, log_IC50, nH),
+    hill_function
+  )) %>%
+  dplyr::group_by(log_conc) %>%
+  dplyr::summarise(
+    response_mean = mean(tissue_response),
+    response_upper = quantile(tissue_response, probs = 0.945),
+    response_lower = quantile(tissue_response, probs = 0.055)
+  ) %>%
+  ggplot() +
+  geom_ribbon(
+    aes(
+      x = log_conc,
+      ymin = response_lower,
+      ymax = response_upper,
+      fill = "89% interval"
+    ),
+    alpha = 0.5
+  ) +
+  geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
+  geom_point(
+    data = dplyr::filter(observations, compound == example_curve),
+    aes(x = log_conc, y = response, colour = "Observations")
+  ) +
+  geom_function(
+    fun = hill_function,
+    args = true_parameters[example_curve, -c(1,6)],
+    mapping = aes(colour = "True tissue response")
+  ) +
+  labs(
+    y = "Tissue response",
+    x = "Log ligand concentration [M]",
+    colour = "",
+    fill = ""
+  ) +
+  scale_fill_manual(values = c("89% interval" = colour$azure)) +
+  theme_minimal()
+post_pred +
+  scale_colour_manual(values = c(
+    "Posterior mean" = colour$blue_dark,
+    "Observations" = colour$orange_light,
+    "True tissue response" = colour$orange_dark
+  ))
+```
+
+
+```{r model_comp}
+mod <- nls(
+  response ~ top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH)),
+  data = dplyr::filter(observations, compound == 1),
+  algorithm = "port",
+  start = list(bottom = 0, top = 1, log_IC50 = -6, nH = 1),
+  lower = list(bottom = -0.02, top = 0.98, log_IC50 = -9, nH = 0),
+  upper = list(bottom = 0.02, top = 1.02, log_IC50 = -3, nH = 100)
+)
+
+post_pred +
+  geom_function(
+    fun = hill_function,
+    args = mod$m$getPars(),
+    mapping = aes(colour = "NLS fit")
+  ) +
+  scale_colour_manual(values = c(
+    "Posterior mean" = colour$blue_dark,
+    "Observations" = colour$orange_light,
+    "True tissue response" = colour$orange_dark,
+    "NLS fit" = "black"
+  ))
+
+```
