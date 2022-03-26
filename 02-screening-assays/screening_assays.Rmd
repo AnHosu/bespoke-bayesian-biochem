@@ -14,13 +14,13 @@ knitr::opts_chunk$set(comment=NA)
 
 I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput.
 
-In [a previous study]({{< relref "/project/bespoke-biochem-one" >}})
+In [two previous studies]({{< relref "/project/bespoke-biochem-one" >}}) we built bespoke Bayesian models to fit observations from a biochemical assay with kinetics that could be represented by the Hill equation. In those studies, we fit a single curves one at a time. In this study, we extend the model to capture the additional information available when screening a large number of compounds in parallel.
+
+We start by setting a seed and some nice colours for plotting.
 
 ```{r utilities, message=FALSE}
 library(ggplot2)
 library(magrittr)
-
-options(mc.cores = parallel::detectCores())
 
 colour <- list(
   orange_dark = "#fb8500",
@@ -33,32 +33,59 @@ colour <- list(
 set.seed(4444)
 ```
 
-# Generative Process
+# High Troughput Biochemical Experiments
 
-We produce modifications to the endogenous ligand which has known parameters logIC50 = 7.2 and
+With Bayesian models, we can take advantage of our domain expertise to produce clear answers to our scientific hypotheses and to quantify uncertainty in data and hypotheses. It does, however, require that we are able to represent our expertise as probabilistic models. So before we dive into the Bayesian engine, let's discuss our biochemistry knowledge and the data we might get from a high throughput experiment.
 
-```{r generative_model}
+We are considering compounds that are potential ligands to receptors and cause a tissue response according to the Hill equation
+
+$$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_i]))^{n_H}}}$$
+
+Where $\mu_{ij}$ is the tissue response of the $j$'th compound at concentration $[A_i]$.
+
+The equation looks slightly different from the previous studies because we now have multiple compounds in a screening study. The equation also encodes a few assumptions about such an assay. First of all, we are assuming that the tissue response in the absence of ligand, $top$, is the same for all tested compounds. Similarly, we are assuming that the kinetics of the tissue response, as represented by the Hill number, $n_H$, stays the same for all compounds. For the maximum tissue response, $bottom_j$, and the concentration at half response, $\log_{10}(IC_{50,j}$, however, we are assuming that each compound has its own parameter.
+
+These assumptions might not hold true for every experiment, but if we imagine that we are screening compounds for a good drug candidate and we are looking at the same tissue response for each of them, these assumptions should hold.
+
+As in previous studies, I opt for synthetic data. This has two advantages; we are forced to consider the underlying process that generates our experiment data and, after we have applied a model, we can compare the output to our known truth. We can code the first part of the generative process with a simple function
+
+```{r hill_function}
 hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
   top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH))
 }
+```
 
+Now, our observations are not perfect and will be subject to some noise. For this study, we are going to assume that all observations were made in the same batch, under the same conditions, and at the same time such that they have identically distributed noise. Specifically, we will give the observations some Gaussian noise.
+
+```{r assay_response}
 assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
   noise <- rnorm(length(log_conc), 0, sigma)
   hill_function(log_conc, bottom, top, log_IC50, nH) + noise
 }
+```
 
+Next we should consider what type of screening we are doing. There are a couple of different options. We could screen a lot of random compounds for activity. While this is a common scenario, it is not too interesting to model, as we expect that the vast majority of tested compounds will have no activity. In this study, as in the previous, we instead imagine the case where we produce a large number of variations on an endogenous ligand, in the hopes that we stumble upon something with more desirable properties like higher potency.
+
+So we produce 100 modifications to an endogenous ligand which has known parameters $\log_{10}(IC_{50} = -7.2$ and $bottom = 0$. We expect that the modifications might cause us to lose potency, i.e. increase $\log_{10}(IC_{50}$, and efficacy, i.e. increase $bottom$, most of the time.
+
+With this, we have the final part of the generative model:
+
+```{r generative_model}
 n_compounds <- 100
-assay_window <- seq(-9, -3, length.out = 6)
 
 true_parameters <- tibble::tibble(
   compound = seq(1, n_compounds),
   bottom = 1 - rlnorm(n_compounds, -0.25, 0.125),
-  log_IC50 = rnorm(n_compounds, -7, 0.5),
+  log_IC50 = rnorm(n_compounds, -5, 1.5) + rexp(n_compounds, 3),
   top = 0.99,
   nH = 1.01,
   sigma = 0.15
 )
+```
 
+With the generative model in place, we can draw a few of the true curves that we will sample from and estimate in our hypothetical screening experiment.
+
+```{r generative_model}
 true_curves <- purrr::pmap(
   true_parameters,
   ~ geom_function(
@@ -75,19 +102,24 @@ true_curves <- purrr::pmap(
 )
 
 p <- ggplot() +
-  xlim(-9, -3) +
+  xlim(-9, -1) +
   theme_minimal() +
-  labs(x = "Ligand concentration [M]" , y = "True tissue response")
+  labs(
+    x = "Ligand concentration [M]",
+    y = "True tissue response",
+    title = "Sample True Tissue Responses"
+  )
 
 Reduce(`+`, true_curves[1:10], init = p)
 ```
 
+# Bespoke Bayesian Model
 
+Now that we understand the generative process and we have some data, we can start considering a Bayesian model. We need to specify two things; a set of relations that describe the generative process and priors for any parameters. If this seems similar to what we just did in the previous section, it is because it is. The Baysian model should reflect the process that generated the data. So let's get started.
 
+## Likelihood Model
 
-# Model
-
-In our screening assay, we will consider $M$ compounds $j = 1, ..., M$. For each compound, we measure an assay response, $y_{ij}$, for a number of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_ij$, but that observations are noisy:
+In our screening assay, we will consider $M$ compounds $j = 1, ..., M$. For each compound, we measure an assay response, $y_{ij}$, for a number, $i = 1, ..., N$, of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_{ij}$, but that observations are noisy:
 
 $$y_{ij} \sim {\sf Normal}(\mu_{ij}, \sigma)$$
 
@@ -97,11 +129,9 @@ The tissue response is a deterministic function of four kinetic parameters, as d
 
 $$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_{ij}]))^{n_H}}}$$
 
+## Priors
 
-
-# Priors
-
-For $top$, $n_H$, and $\sigma$, we can use the same priors as when we fit one curve.
+For $top$, $n_H$, and $\sigma$, we can use the same priors as the previous studies, when we fit one curve.
 
 $$top \sim {\sf Normal}(1, 0.01)$$
 $$n_H \sim {\sf LogNormal}(0, 1)$$
@@ -110,13 +140,15 @@ $$\sigma \sim {\sf Exp}(10)$$
 
 We now have multiple $bottom_i$ parameters to consider.
 
-As in study 2 in the previous post, we know that the most likely scenario is where our modification causes the ligand to lose efficacy yielding a minimum tissue response somewhere between 0 and 1. However, there is a small chance that our superior design yields a ligand that is more efficacious than the endogenous ligand and thus has a minimum response below 0. Our prior for the $bottom$ parameter should thus be concentrated between 0 and 1 but with some probability below 0. I have opted for a normal prior.
+We know that the most likely scenario is where our modification causes the ligand to lose efficacy yielding a minimum tissue response somewhere between 0 and 1. However, there is a small chance that our superior design yields a ligand that is more efficacious than the endogenous ligand and thus has a minimum response below 0. Our prior for the $bottom$ parameter should thus be concentrated between 0 and 1 but with some probability below 0. I have opted for a normal prior.
 
 The question remaining is whether this argument is true for all $bottom_i$. I am going to assume that it is and use the same prior for all $bottom_i$.
 
 $$bottom_i \sim {\sf Normal}(0.25, 0.25)$$
 
-The modified ligand is likely to lose potency, i.e. have a higher $\log_{10}(IC_{50,i})$, compared to the endogenous ligand which has $\log_{10}(IC_{50,i}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a somewhat narrow prior. Again, we will use the same prior for all $\log_{10}(IC_{50,i})$:
+The modified ligand is likely to lose potency, i.e. have a higher $\log_{10}(IC_{50,i})$, compared to the endogenous ligand which has $\log_{10}(IC_{50,i}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a somewhat narrow prior. Again, we will use the same prior for all $\log_{10}(IC_{50,i})$.
+
+You might have noticed 
 
 $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
 
@@ -159,6 +191,7 @@ screening_experiment <- function(parameters, log_conc) {
 Now we can do our prior predictive check by performing a hypothetical experiment with our priors
 
 ```{r}
+
 priors <- list(
   bottom_mean <- 0.25,
   bottom_sd <- 0.25,
@@ -196,6 +229,8 @@ writeLines(readLines("hill_equation_screening.stan"))
 # Fitting
 
 ```{r}
+assay_window <- seq(-8, -2, length.out = 6)
+
 observations <- screening_experiment(
   parameters = true_parameters,
   log_conc = assay_window
@@ -395,13 +430,13 @@ tibble::as_tibble(post_summaries) %>%
 ## Posterior Predictive
 
 ```{r posterior_predictive_study_2, fig.dim=c(8, 4), out.width="90%"}
-example_curve <- 1
+example_curve <- 3
 post_pred <- posterior_samples %>%
   dplyr::mutate(
     log_IC50 = log_IC50[, example_curve],
     bottom = bottom[, example_curve]
   ) %>%
-  tidyr::expand_grid(log_conc = seq(-3, -9, length.out = 50)) %>% 
+  tidyr::expand_grid(log_conc = seq(-2, -9, length.out = 50)) %>% 
   dplyr::mutate(tissue_response = purrr::pmap_dbl(
     list(log_conc, bottom, top, log_IC50, nH),
     hill_function
