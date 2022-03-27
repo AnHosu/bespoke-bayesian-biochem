@@ -66,7 +66,7 @@ assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
 
 Next we should consider what type of screening we are doing. There are a couple of different options. We could screen a lot of random compounds for activity. While this is a common scenario, it is not too interesting to model, as we expect that the vast majority of tested compounds will have no activity. In this study, as in the previous, we instead imagine the case where we produce a large number of variations on an endogenous ligand, in the hopes that we stumble upon something with more desirable properties like higher potency.
 
-So we produce 100 modifications to an endogenous ligand which has known parameters $\log_{10}(IC_{50} = -7.2$ and $bottom = 0$. We expect that the modifications might cause us to lose potency, i.e. increase $\log_{10}(IC_{50}$, and efficacy, i.e. increase $bottom$, most of the time.
+So we produce 100 modifications to an endogenous ligand which has known parameters $\log_{10}(IC_{50} = -7.2$ and $bottom = 0$. We expect that the modifications might cause us to lose potency, i.e. increase $\log_{10}(IC_{50}$, and efficacy, i.e. increase $bottom$, most of the time. To add a little extra challenge, I am adding compounds that have extremely low $\log_{10}(IC_{50}$ corresponding to the case where our modification almost or completely removes potency.
 
 With this, we have the final part of the generative model:
 
@@ -131,34 +131,39 @@ $$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{1
 
 ## Priors
 
-For $top$, $n_H$, and $\sigma$, we can use the same priors as the previous studies, when we fit one curve.
+For the minimum response parameter, $top$, we will specify a narrow prior, as we have no indication that it should be anything other than 1. 
 
 $$top \sim {\sf Normal}(1, 0.01)$$
-$$n_H \sim {\sf LogNormal}(0, 1)$$
+
+In a real scenario the Hill number, $n_H$, will probably be well know before high throughput screening experiments are done. For the purpose of demonstration, however, we will give it a relatively wide prior and hope to learn the true number from our data, in this case. 
+
+$$n_H \sim {\sf LogNormal}(0, 0.5)$$
+
+For sigma $\sigma$, we put a prior that corresponds to a mean standard deviation that is 10% of the assay window. We also want very high noise to be very unlikely.
 
 $$\sigma \sim {\sf Exp}(10)$$
 
 We now have multiple $bottom_i$ parameters to consider.
 
-We know that the most likely scenario is where our modification causes the ligand to lose efficacy yielding a minimum tissue response somewhere between 0 and 1. However, there is a small chance that our superior design yields a ligand that is more efficacious than the endogenous ligand and thus has a minimum response below 0. Our prior for the $bottom$ parameter should thus be concentrated between 0 and 1 but with some probability below 0. I have opted for a normal prior.
+We know that the most likely scenario is where our modification causes the ligand to lose efficacy yielding a minimum tissue response somewhere between 0 and 1. However, there is a small chance that our superior design yields a ligand that is more efficacious than the endogenous ligand and thus has a minimum response below 0. Our prior for the $bottom$ parameter should thus be concentrated between 0 and 1 but with some probability below 0. Let's try a normal prior.
 
-The question remaining is whether this argument is true for all $bottom_i$. I am going to assume that it is and use the same prior for all $bottom_i$.
+The question that remains is whether this argument is true for all $bottom_i$. We are going to assume that it is and use the same prior for all $bottom_i$.
 
 $$bottom_i \sim {\sf Normal}(0.25, 0.25)$$
 
 The modified ligand is likely to lose potency, i.e. have a higher $\log_{10}(IC_{50,i})$, compared to the endogenous ligand which has $\log_{10}(IC_{50,i}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a somewhat narrow prior. Again, we will use the same prior for all $\log_{10}(IC_{50,i})$.
 
-You might have noticed 
+We added a bit of an extra challenge, allowing for some compounds to have very high $\log_{10}(IC_{50,i})$. For now, we are going to pretend that we do not have that knowledge and see what this prior will do for us. In a real world scenario, we never know the true best prior to use. All we can do is apply our scientific experience and logic.
 
 $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
 
-## Prior Predictive Simulation
+# Prior Predictive Simulation
 
-We should control that we have chosen sensible priors with a prior predictive check. So let's imagine that we perform the screening experiment, sampling the underlying parameters from our prior distributions, and have a look at the hypothetical observations that would arise.
+With the model and priors in place, we should control the sensibility of them with a prior predictive check. So let's imagine that we perform the screening experiment, sampling the underlying parameters from our prior distributions, and have a look at the hypothetical observations that would arise.
 
 Let's go ahead and define a function for sampling our priors and simulating a screening experiment.
 
-```{r generative_model2}
+```{r prior_generator}
 prior_parameters <- function(n_compounds = NULL,
                              bottom_mean = NULL,
                              bottom_sd = NULL,
@@ -190,28 +195,32 @@ screening_experiment <- function(parameters, log_conc) {
 
 Now we can do our prior predictive check by performing a hypothetical experiment with our priors
 
-```{r}
-
+```{r prior_predictive_check}
 priors <- list(
   bottom_mean <- 0.25,
   bottom_sd <- 0.25,
   top_mean <- 1,
-  top_sd <- 0.025,
+  top_sd <- 0.01,
   log_IC50_mean <- -6,
-  log_IC50_sd <- 0.7,
+  log_IC50_sd <- 1.5,
   nH_meanlog <- 0,
-  nH_sdlog <- 0.01,
+  nH_sdlog <- 0.5,
   sigma_rate <- 10
 )
 
-
-rlang::exec(
-  prior_parameters,
-  n_compounds = 50,
-  !!!priors
+replicate(
+  10,
+  rlang::exec(
+    prior_parameters,
+    n_compounds = 5,
+    !!!priors
+  ),
+  simplify = FALSE
 ) %>%
+  dplyr::bind_rows(.id = "rep") %>%
+  dplyr::mutate(rep = paste0(rep, "-", compound)) %>%
   screening_experiment(log_conc = seq(-10, -2, length.out = 100)) %>%
-  ggplot(aes(x = log_conc, y = response, group = compound)) +
+  ggplot(aes(x = log_conc, y = response, group = rep)) +
     geom_line(colour = colour$blue_dark, alpha = 0.5) +
     theme_minimal() +
     labs(
