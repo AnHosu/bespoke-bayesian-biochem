@@ -229,6 +229,8 @@ replicate(
     title = "Prior Samples"
     )
 ```
+
+Our prior understanding of the data generating process predicts a diverse set of curves. One of the things that often surprises me is the large number of seeming outliers, even with conservative estimates for noise. Given variance and enough samples, we are bound to see some 
 # Stan Model
 
 ```{r stan_model}
