@@ -3,7 +3,7 @@ title: "Bespoke Bayesian Model for High Throughput Biochemical Assays"
 author: "Anders Ellegaard"
 date: '2021-12-30'
 bibliography: references.bib
-csl: citation_style.csl
+csl: ../citation_style.csl
 link-citations: yes
 linkcolor: blue
 ---
@@ -43,7 +43,7 @@ $$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{1
 
 Where $\mu_{ij}$ is the tissue response of the $j$'th compound at concentration $[A_i]$.
 
-The equation looks slightly different from the previous studies because we now have multiple compounds in a screening study. The equation also encodes a few assumptions about such an assay. First of all, we are assuming that the tissue response in the absence of ligand, $top$, is the same for all tested compounds. Similarly, we are assuming that the kinetics of the tissue response, as represented by the Hill number, $n_H$, stays the same for all compounds. For the maximum tissue response, $bottom_j$, and the concentration at half response, $\log_{10}(IC_{50,j}$, however, we are assuming that each compound has its own parameter.
+The equation looks slightly different from the previous studies because we now have multiple compounds in a screening study. The equation also encodes a few assumptions about such an assay. First of all, we are assuming that the tissue response in the absence of ligand, $top$, is the same for all tested compounds. Similarly, we are assuming that the kinetics of the tissue response, as represented by the Hill number, $n_H$, stays the same for all compounds. For the maximum tissue response, $bottom_j$, and the concentration at half response, $\log_{10}(IC_{50,j})$, however, we are assuming that each compound has its own parameter.
 
 These assumptions might not hold true for every experiment, but if we imagine that we are screening compounds for a good drug candidate and we are looking at the same tissue response for each of them, these assumptions should hold.
 
@@ -66,11 +66,11 @@ assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
 
 Next we should consider what type of screening we are doing. There are a couple of different options. We could screen a lot of random compounds for activity. While this is a common scenario, it is not too interesting to model, as we expect that the vast majority of tested compounds will have no activity. In this study, as in the previous, we instead imagine the case where we produce a large number of variations on an endogenous ligand, in the hopes that we stumble upon something with more desirable properties like higher potency.
 
-So we produce 100 modifications to an endogenous ligand which has known parameters $\log_{10}(IC_{50} = -7.2$ and $bottom = 0$. We expect that the modifications might cause us to lose potency, i.e. increase $\log_{10}(IC_{50}$, and efficacy, i.e. increase $bottom$, most of the time. To add a little extra challenge, I am adding compounds that have extremely low $\log_{10}(IC_{50}$ corresponding to the case where our modification almost or completely removes potency.
+So we produce 100 modifications to an endogenous ligand which has known parameters $\log_{10}(IC_{50}) = -7.2$ and $bottom = 0$. We expect that the modifications might cause us to lose potency, i.e. increase $\log_{10}(IC_{50})$, and efficacy, i.e. increase $bottom$, most of the time. To add a little extra challenge, I am adding compounds that have extremely low $\log_{10}(IC_{50})$ corresponding to the case where our modification almost or completely removes potency.
 
 With this, we have the final part of the generative model:
 
-```{r generative_model}
+```{r true_parameters}
 n_compounds <- 100
 
 true_parameters <- tibble::tibble(
@@ -85,7 +85,7 @@ true_parameters <- tibble::tibble(
 
 With the generative model in place, we can draw a few of the true curves that we will sample from and estimate in our hypothetical screening experiment.
 
-```{r generative_model}
+```{r generative_model, fig.dim=c(8, 4), out.width="90%"}
 true_curves <- purrr::pmap(
   true_parameters,
   ~ geom_function(
@@ -163,7 +163,7 @@ With the model and priors in place, we should control the sensibility of them wi
 
 Let's go ahead and define a function for sampling our priors and simulating a screening experiment.
 
-```{r prior_generator}
+```{r prior_generator, fig.dim=c(8, 4), out.width="90%"}
 prior_parameters <- function(n_compounds = NULL,
                              bottom_mean = NULL,
                              bottom_sd = NULL,
@@ -195,7 +195,7 @@ screening_experiment <- function(parameters, log_conc) {
 
 Now we can do our prior predictive check by performing a hypothetical experiment with our priors
 
-```{r prior_predictive_check}
+```{r prior_predictive_check, fig.dim=c(8, 4), out.width="90%"}
 priors <- list(
   bottom_mean <- 0.25,
   bottom_sd <- 0.25,
@@ -230,16 +230,25 @@ replicate(
     )
 ```
 
-Our prior understanding of the data generating process predicts a diverse set of curves. One of the things that often surprises me is the large number of seeming outliers, even with conservative estimates for noise. Given variance and enough samples, we are bound to see some 
-# Stan Model
+Our prior understanding of the data generating process predicts a diverse set of curves. One of the things that often surprises me is the large number of seeming outliers, even with conservative estimates for noise. Given variance and enough samples, we are bound to see some weird behaviour.
+
+I think that these hypothetical samples seem like a fair representation of the samples I expect to get from the assay. If for some reason we thought that the hypothetical samples looked too extreme or did not represent the full range of possible observations, we would have to go back and adjust our priors.
+
+# Bayesian Model
+
+Now it is time for the fun part. First we implement the complete Bayesian model, consisting of our observational model and prior distributions, in Stan.
+
+The trick here is to define an index variable that keeps track of parameters for individual curves.
 
 ```{r stan_model}
 writeLines(readLines("hill_equation_screening.stan"))
 ```
 
-# Fitting
+## Conditioning
 
-```{r}
+Next we need some data to condition our model on. So we perform a simulated screening experiment using our true parameters. Recall that we have 100 compounds. In the screening experiment we will sample the tissue response for each compound at 6 different concentrations.
+
+```{r model_conditioning, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
 assay_window <- seq(-8, -2, length.out = 6)
 
 observations <- screening_experiment(
@@ -268,6 +277,15 @@ posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
 ```
 
 # Examining the Posterior
+
+Before applying the model, we should do some quality
+
+## Quality of the Monte Carlo Simulation
+
+```{r mc_check}
+rstan::check_hmc_diagnostics(post)
+```
+
 
 ## Posterior Marginal Distributions
 
@@ -345,6 +363,7 @@ post_summaries <- rstan::summary(
 tibble::as_tibble(post_summaries) %>%
   dplyr::select(-c(mean, se_mean, sd)) %>%
   dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  dplyr::mutate(dplyr::across(-parameter, round, digits = 3)) %>%
   knitr::kable()
 ```
 
