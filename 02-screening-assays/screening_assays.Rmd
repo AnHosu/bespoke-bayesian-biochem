@@ -77,8 +77,8 @@ true_parameters <- tibble::tibble(
   compound = seq(1, n_compounds),
   bottom = 1 - rlnorm(n_compounds, -0.25, 0.125),
   log_IC50 = rnorm(n_compounds, -5, 1.5) + rexp(n_compounds, 3),
-  top = 0.99,
-  nH = 1.01,
+  top = 1.02,
+  nH = 0.99,
   sigma = 0.15
 )
 ```
@@ -153,7 +153,7 @@ $$bottom_i \sim {\sf Normal}(0.25, 0.25)$$
 
 The modified ligand is likely to lose potency, i.e. have a higher $\log_{10}(IC_{50,i})$, compared to the endogenous ligand which has $\log_{10}(IC_{50,i}) = -7.2$, but we might get lucky and see an increase. This is not much to go on, but it should still allow us to use a somewhat narrow prior. Again, we will use the same prior for all $\log_{10}(IC_{50,i})$.
 
-We added a bit of an extra challenge, allowing for some compounds to have very high $\log_{10}(IC_{50,i})$. For now, we are going to pretend that we do not have that knowledge and see what this prior will do for us. In a real world scenario, we never know the true best prior to use. All we can do is apply our scientific experience and logic.
+We added a bit of an extra challenge, allowing for some compounds to have very high $\log_{10}(IC_{50,i})$. For now, we are going to pretend that we do not have that knowledge and see what this prior will do for us. In a real world scenario, we never know the true distributions. The best priors arise by applying our scientific experience and logic.
 
 $$\log_{10}(IC_{50}) \sim {\sf Normal}(-6, 1.5)$$
 
@@ -264,13 +264,13 @@ data <- list(
   y = observations$response
 )
 
-post <- rstan::stan(
-  file = "hill_equation_screening.stan",
-  data = data,
-  chains = 4,
-  cores = 4,
-  seed = 4444
-)
+post <- rstan::stan_model("hill_equation_screening.stan") %>%
+  rstan::sampling(
+    data = data,
+    chains = 4,
+    cores = 4,
+    seed = 4444
+  )
 
 # Extract samples from the posterior distribution
 posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
@@ -278,16 +278,95 @@ posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
 
 # Examining the Posterior
 
-Before applying the model, we should do some quality
+Before applying the model, we should do some quality assurance. Since we have simulated data, we can of course compare the posterior distributions to our known truth, and we will definitely do that, in a moment. In real problems, however, the truth is not known and we have to rely on other approaches.
+
+Here I have three approaches that rely only on the model and the data. None of the approaches will tell us whether the model is a good one, but they will often indicate any problems.
 
 ## Quality of the Monte Carlo Simulation
 
-```{r mc_check}
-rstan::check_hmc_diagnostics(post)
+The first thing we can do is do a quality check of the Monte Carlo sampling. Stan usually complains when something seems wrong, but we can also check some specific diagnostics.
+
+I often get divergent transitions when I build multilevel models and they are a signal that there are areas of the model space that are difficult to traverse. Often they can be fixed by increasing the `adapt\_delta` parameter like we did in a previous study. When that does not work, it is a sign that maybe the model needs to be re-parametrised. For our model in this study, we should not have that problem, though.
+
+```{r divergent_transitions_check}
+rstan::check_divergences(post)
 ```
 
+When Stan complains about maximum tree depth it is because the Monte Carlo sampler was unable to fully explore some parts of the model space. It is really only an efficiency metric, but a common piece of advise when experiencing tree depth warnings is to use narrower priors. I also often find that I see this warning when I have forgotten to put an explicit prior on a parameter. In this case, we have put a lot of thought into our priors and they should be good.
+
+```{r treedepth_check}
+rstan::check_treedepth(post)
+```
+
+## Convergence
+
+We should also check check whether each of our parameters have properly converged. Stan provides two metrics for us to review. $\hat{R}$ is a measure of convergence and when $\hat{R} > 1.01$ it is an indication that the posterior samples aren't quite representative of the true posterior distribution.
+
+$n\_eff$ is an estimate of the number of true samples our chains represent. If the number of effective samples is low compared to the number of samples we chose to take after warm up, it indicates that it was difficult for the Monte Carlo sampler to figure out that parameter in the grand scheme of things. Sometimes it helps to increase $adapt\_delta$ and do more warm-up samples, but I find that it is also often indicative of data that is very incompatible with the model and its priors. In this study, we ran four chains with 1000 samples after warm-up, so we would like to see at least several hundred effective samples.
+
+Let's just have a look at the parameters that proved to be most difficult.
+
+```{r convergence_check}
+post_summaries <- rstan::summary(
+  post,
+  pars = c("bottom", "log_IC50"),
+  probs = NULL
+)$summary
+
+tibble::as_tibble(post_summaries) %>%
+  dplyr::select(-c(mean, se_mean, sd)) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  dplyr::arrange(desc(Rhat)) %>%
+  dplyr::slice_head(n = 10) %>%
+  knitr::kable()
+```
+
+Compound number 93 seems to have caused a bit of trouble, but not too much that we should worry about it.
+
+Note that some parameters have $n\_eff$ that are quite a bit below the 4000 samples after warm-up. This is not necessarily a cause for concern, but in case it is very low and we want to use the distribution for predictive purposes, it might be a good idea to increase the number of samples after warm-up a bit.
+
+## Data Replication Check
+
+A great sanity check for a model is whether it is able to replicate the data. Our model is fully generative, meaning we can generate hypothetical samples. For a good model, when we generate a number of samples corresponding to the number of data points, the qualitative properties those samples should be similar to those of the original data. Parameters like mean and variance will be very similar, as those are basically the parameters we conditioned on the data, but more qualitative aspects like minimum data point, maximum, or general shape are not a given.
+
+In the Stan script, I included some generated quantities that are essentially sample observations, so we can compare. We will skip comparing maximum and minimum and just compare the overall shape.
+
+```{r shape_check}
+ggplot() +
+  geom_histogram(
+    data = observations,
+    mapping = aes(x = response, y = ..density.., fill = "Observed responses"),
+    bins = 30,
+    alpha = 0.5
+  ) +
+  geom_histogram(
+    data = tibble::tibble(y_sampled = as.vector(posterior_samples$y_sampled)),
+    mapping = aes(x = y_sampled, y = ..density.., fill = "Posterior samples"),
+    bins = 300,
+    alpha = 0.5
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = list(
+    "Observed responses" = colour$azure,
+    "Posterior samples" = colour$blue_dark
+  )) +
+  labs(
+    fill = "",
+    y = "Density",
+    x = "Response",
+    title = "Shape Check"
+  )
+```
+
+It really looks like out model replicates the data quite nicely. Usually the concerns are whether the tails match; if the data has minimum points that are outside what the model yields or if the samples span a much wider range than the data, it might be cause to rethink the model.
+
+# Results
+
+Our model and the posterior samples seem to be of decent quality, so let's put them to use.
 
 ## Posterior Marginal Distributions
+
+So our model has 203 parameters, 2 for each of the 100 compounds and 3 parameters that are shared between all of them. Let's see what we have learned about the three shared parameters.
 
 ```{r posterior_marginals_shared, fig.dim=c(8, 4), out.width="90%"}
 # True parameters of the simulation.
@@ -353,6 +432,8 @@ posterior_samples %>%
   )
 ```
 
+And some summary statistics
+
 ```{r posterior_summary_shared_params}
 post_summaries <- rstan::summary(
   post,
@@ -363,13 +444,19 @@ post_summaries <- rstan::summary(
 tibble::as_tibble(post_summaries) %>%
   dplyr::select(-c(mean, se_mean, sd)) %>%
   dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
-  dplyr::mutate(dplyr::across(-parameter, round, digits = 3)) %>%
+  dplyr::mutate(dplyr::across(-parameter, round, digits = 2)) %>%
   knitr::kable()
 ```
 
+When we fitted the curve for each individual compound, we ended up with posteriors that were very similar to our priors, indicating that the data was insufficient to provide additional information. In this case, however, we share information about the curve shape, sample noise, and the minimum response among all compounds. The pooling of all that information causes us to get very exact estimates for the curve shape and the sample noise. The estimates are even essentially equal to the truth. For the minimum response, our prior is still very informative compared to the data, so the posterior distribution has barely changed.
+
+These results are quite profound. Even with a relatively wide prior on $n_H$, corresponding to little knowledge about the kinetics of the response, we were able to estimate those exact kinetics, despite the data being intended for a different purpose. In real problems, we would often be much more sure about that parameter. Similarly, we have a very exact estimate of the experiment noise. If we regularly run such screening experiments this would be a great metric to track over time.
+
+
+We cannot look at parameters and curves for each of the compounds, so lets just pick a couple including the troublesome number 93.
 
 ```{r posterior_marginals_compounds, fig.dim=c(8, 4), out.width="90%"}
-compounds <- 3:7
+compounds <- c(1:5, 93)
 
 # True parameters of the simulation.
 truth <- true_parameters %>%
@@ -442,6 +529,8 @@ lapply(compounds, function(i) {
   )
 ```
 
+And some summary statistics
+
 ```{r posterior_summary_compund_params}
 post_summaries <- rstan::summary(
   post,
@@ -452,15 +541,18 @@ post_summaries <- rstan::summary(
 tibble::as_tibble(post_summaries) %>%
   dplyr::select(-c(mean, se_mean, sd)) %>%
   dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
-  dplyr::arrange(desc(Rhat)) %>%
-  dplyr::slice_head(n = 5) %>%
+  dplyr::mutate(dplyr::across(-parameter, round, digits = 2)) %>%
+  dplyr::filter(stringr::str_detect(
+    parameter,
+    paste0("(\\[", compounds, "\\])", collapse = "|")
+  )) %>%
   knitr::kable()
 ```
 
 ## Posterior Predictive
 
 ```{r posterior_predictive_study_2, fig.dim=c(8, 4), out.width="90%"}
-example_curve <- 3
+example_curve <- 93
 post_pred <- posterior_samples %>%
   dplyr::mutate(
     log_IC50 = log_IC50[, example_curve],
@@ -517,11 +609,11 @@ post_pred +
 ```{r model_comp}
 mod <- nls(
   response ~ top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH)),
-  data = dplyr::filter(observations, compound == 1),
+  data = dplyr::filter(observations, compound == example_curve),
   algorithm = "port",
-  start = list(bottom = 0, top = 1, log_IC50 = -6, nH = 1),
-  lower = list(bottom = -0.02, top = 0.98, log_IC50 = -9, nH = 0),
-  upper = list(bottom = 0.02, top = 1.02, log_IC50 = -3, nH = 100)
+  start = list(bottom = 0.25, top = 1, log_IC50 = -6, nH = 1),
+  lower = list(bottom = -0.3, top = 0.98, log_IC50 = -9, nH = 0),
+  upper = list(bottom = 1.0, top = 1.02, log_IC50 = -3, nH = 2)
 )
 
 post_pred +
@@ -538,3 +630,4 @@ post_pred +
   ))
 
 ```
+
