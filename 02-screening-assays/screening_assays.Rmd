@@ -9,7 +9,7 @@ linkcolor: blue
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(comment=NA)
+knitr::opts_chunk$set(comment = NA)
 ```
 
 I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput.
@@ -316,12 +316,13 @@ post_summaries <- rstan::summary(
 tibble::as_tibble(post_summaries) %>%
   dplyr::select(-c(mean, se_mean, sd)) %>%
   dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  dplyr::mutate(dplyr::across(-parameter, round, digits = 3)) %>%
   dplyr::arrange(desc(Rhat)) %>%
   dplyr::slice_head(n = 10) %>%
   knitr::kable()
 ```
 
-Compound number 93 seems to have caused a bit of trouble, but not too much that we should worry about it.
+It looks like our parameters have converged nicely.
 
 Note that some parameters have $n\_eff$ that are quite a bit below the 4000 samples after warm-up. This is not necessarily a cause for concern, but in case it is very low and we want to use the distribution for predictive purposes, it might be a good idea to increase the number of samples after warm-up a bit.
 
@@ -453,14 +454,14 @@ When we fitted the curve for each individual compound, we ended up with posterio
 These results are quite profound. Even with a relatively wide prior on $n_H$, corresponding to little knowledge about the kinetics of the response, we were able to estimate those exact kinetics, despite the data being intended for a different purpose. In real problems, we would often be much more sure about that parameter. Similarly, we have a very exact estimate of the experiment noise. If we regularly run such screening experiments this would be a great metric to track over time.
 
 
-We cannot look at parameters and curves for each of the compounds, so lets just pick a couple including the troublesome number 93.
+We cannot look at parameters and curves for each of the compounds, so lets just pick a couple, including one that is difficult to fit. As with the shared parameters, we compare the posterior samples to the prior distribution and our known truth.
 
 ```{r posterior_marginals_compounds, fig.dim=c(8, 4), out.width="90%"}
-compounds <- c(1:5, 93)
+example_compounds <- c(1:5, 93)
 
 # True parameters of the simulation.
 truth <- true_parameters %>%
-  dplyr::filter(compound %in% compounds) %>%
+  dplyr::filter(compound %in% example_compounds) %>%
   tidyr::pivot_longer(
     -compound,
     names_to = "parameter",
@@ -485,11 +486,11 @@ prior_samples <- replicate(
     names_to = "parameter",
     values_to = "sample"
   ) %>%
-  tidyr::expand_grid(compound = compounds)
+  tidyr::expand_grid(compound = example_compounds)
 
 # Plot each of the marginal distributions, comparing prior, posterior, and true
 #  simulation parameters
-lapply(compounds, function(i) {
+lapply(example_compounds, function(i) {
   tibble::tibble(
     bottom = posterior_samples$bottom[,i],
     log_IC50 = posterior_samples$log_IC50[,i],
@@ -541,22 +542,29 @@ post_summaries <- rstan::summary(
 tibble::as_tibble(post_summaries) %>%
   dplyr::select(-c(mean, se_mean, sd)) %>%
   dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
-  dplyr::mutate(dplyr::across(-parameter, round, digits = 2)) %>%
+  dplyr::mutate(dplyr::across(-parameter, signif, digits = 4)) %>%
   dplyr::filter(stringr::str_detect(
     parameter,
-    paste0("(\\[", compounds, "\\])", collapse = "|")
+    paste0("(\\[", example_compounds, "\\])", collapse = "|")
   )) %>%
   knitr::kable()
 ```
 
+At first glance, these results may seem unimpressive. Even though the posterior has concentrated compared to our prior, it is still fairly wide. Even the compounds with the narrowest estimate of potency has a 89% interval for $\log_{10}(IC_{50})$ spanning more than a unit, corresponding to more than an order of magnitude difference in concentration. That is quite a bit.
+
+Seen from another perspective though, we only had six data points to estimate each of those two parameters. If we were extremely confident in the resulting estimates that would be very suspicious. The means of the marginal posterior distributions are close to the truth, so we have good estimates for any downstream analysis, but the relatively wide distributions are there to remind us that our estimate is uncertain.
+
 ## Posterior Predictive
 
-```{r posterior_predictive_study_2, fig.dim=c(8, 4), out.width="90%"}
-example_curve <- 93
-post_pred <- posterior_samples %>%
+One way to understand how much, or how little, our model has learned from the data is to visualise the posterior predictions along with the original data. Here is a curve where things went rather well
+
+```{r posterior_predictive, fig.dim=c(8, 4), out.width="90%"}
+example_curves <- tibble::tibble(curve = c(3, 93))
+example_curves$post_pred <- purrr::map(example_curves$curve, function(i) {
+  posterior_samples %>%
   dplyr::mutate(
-    log_IC50 = log_IC50[, example_curve],
-    bottom = bottom[, example_curve]
+    log_IC50 = log_IC50[, i],
+    bottom = bottom[, i]
   ) %>%
   tidyr::expand_grid(log_conc = seq(-2, -9, length.out = 50)) %>% 
   dplyr::mutate(tissue_response = purrr::pmap_dbl(
@@ -581,53 +589,115 @@ post_pred <- posterior_samples %>%
   ) +
   geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
   geom_point(
-    data = dplyr::filter(observations, compound == example_curve),
+    data = dplyr::filter(observations, compound == i),
     aes(x = log_conc, y = response, colour = "Observations")
   ) +
   geom_function(
     fun = hill_function,
-    args = true_parameters[example_curve, -c(1,6)],
+    args = true_parameters[i, -c(1,6)],
     mapping = aes(colour = "True tissue response")
   ) +
   labs(
     y = "Tissue response",
     x = "Log ligand concentration [M]",
     colour = "",
-    fill = ""
+    fill = "",
+    title = paste("Posterior Predictive for Compound", i)
   ) +
   scale_fill_manual(values = c("89% interval" = colour$azure)) +
   theme_minimal()
-post_pred +
-  scale_colour_manual(values = c(
-    "Posterior mean" = colour$blue_dark,
-    "Observations" = colour$orange_light,
-    "True tissue response" = colour$orange_dark
-  ))
+})
+example_curves$post_pred_coloured <- purrr::map(
+  example_curves$post_pred,
+  function(p) {
+    p + scale_colour_manual(values = c(
+      "Posterior mean" = colour$blue_dark,
+      "Observations" = colour$orange_light,
+      "True tissue response" = colour$orange_dark
+    ))
+  }
+)
+example_curves$post_pred_coloured[[1]]
 ```
 
+Our model is very open about its uncertainty. While the posterior mean is a great compromise between the data points, the model also knows that the assay is noisy, and it has used the pooled estimate of that noise across all curves to give us this nice interval for any point prediction. Not also how the model has confidently ruled out one of the points as an outlier. I think this is a lot of information gained from just a few points of data.
+
+Now let's have a look at a more difficult case
+
+```{r posterior_predictive_2, fig.dim=c(8, 4), out.width="90%"}
+example_curves$post_pred_coloured[[2]]
+```
+
+This one is difficult because we did not get any good points on the curved part of the tissue response. This makes the estimate for $\log_{10}(IC_{50})$ very uncertain, resulting in the bulge in the middle. Despite all this, the 89% interval nicely contains the true tissue response.
+
+## Model Comparison
+
+Before we wrap up, I want to highlight why I like this approach to modelling my screening assay data in this way by comparing it to a classic model fitting method.
+
+For the comparison, we will use non-linear least squares to directly fit the Hill equation to the data points for a compound. We cannot put flexible priors on the parameters, but we can set constraints that limit the parameters to a range comparable to that of the priors in our Bayesian model.
+
+Again let's start by looking at the case where things go well.
 
 ```{r model_comp}
-mod <- nls(
-  response ~ top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH)),
-  data = dplyr::filter(observations, compound == example_curve),
-  algorithm = "port",
-  start = list(bottom = 0.25, top = 1, log_IC50 = -6, nH = 1),
-  lower = list(bottom = -0.3, top = 0.98, log_IC50 = -9, nH = 0),
-  upper = list(bottom = 1.0, top = 1.02, log_IC50 = -3, nH = 2)
+example_curves$model_comp <- purrr::map2(
+  example_curves$curve,
+  example_curves$post_pred,
+  function(curve, p) {
+    mod <- nls(
+      response ~ top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH)),
+      data = dplyr::filter(observations, compound == curve),
+      algorithm = "port",
+      start = list(bottom = 0.25, top = 1, log_IC50 = -6, nH = 1),
+      lower = list(bottom = -0.3, top = 0.98, log_IC50 = -9, nH = 0),
+      upper = list(bottom = 1.0, top = 1.02, log_IC50 = -3, nH = 2)
+    )
+    
+    p +
+      geom_function(
+        fun = hill_function,
+        args = mod$m$getPars(),
+        mapping = aes(colour = "NLS fit")
+      ) +
+      scale_colour_manual(values = c(
+        "Posterior mean" = colour$blue_dark,
+        "Observations" = colour$orange_light,
+        "True tissue response" = colour$orange_dark,
+        "NLS fit" = "black"
+      ))
+  }
 )
 
-post_pred +
-  geom_function(
-    fun = hill_function,
-    args = mod$m$getPars(),
-    mapping = aes(colour = "NLS fit")
-  ) +
-  scale_colour_manual(values = c(
-    "Posterior mean" = colour$blue_dark,
-    "Observations" = colour$orange_light,
-    "True tissue response" = colour$orange_dark,
-    "NLS fit" = "black"
-  ))
-
+example_curves$model_comp[[1]]
 ```
 
+The least squares model is almost identical to our posterior mean estimate and both are close to the truth. This is not altogether surprising, as we had great data points to fit the model curve on. However, only the Bayesian model comes with an estimate of the uncertainty. With the least squares model, we could easily grow overconfident in the fitted parameters.
+
+Let's have a look at the more difficult case.
+
+```{r model_comp_2}
+example_curves$model_comp[[2]]
+```
+
+In this case, the least squares fit was not really able to find a good foothold in the data, yet it confidently reports the fitted parameters. Granted, our Bayesian model had its troubles too, but at least it reports the extreme uncertainty.
+
+# Conclusion
+
+In this study, we built and explored a Bayesian model for understanding large compound screening assays. We showed that we can use our prior knowledge to build a bespoke model and that such a model provides us with more useful information than a conventional least squares model. We experienced that it takes a bit more work to ensure the quality of a Bayesian model, but we tried out a few ways to do so.
+
+# Next Steps
+
+In the preceding study, we assumed that the compounds were random perturbations on a known endogenous ligand. We also assumed that the observations arose under similar circumstances such that they shared a common noise parameter. These assumptions may hold in some cases, but often we know more about our data than that.
+
+Maybe the permutations could be described with categories or other labels.
+
+Maybe we performed our screening assay in batches across multiple days, resulting in a possible batch effect on observation data quality.
+
+Either of these cases add another layer of complexity, but batch effects and labels are both things we can handle with a bespoke Bayesian model. These are the subjects of a future study. Stay tuned!
+
+# References {-}
+
+<div id="refs"></div>
+
+# License
+
+The content of this project itself is licensed under the [Creative Commons Attribution-ShareAlike 4.0 International license](https://creativecommons.org/licenses/by-sa/4.0/), and the underlying code is licensed under the [GNU General Public License v3.0 license](https://github.com/AnHosu/bespoke-bayesian-biochem/blob/main/LICENSE).
