@@ -1,0 +1,390 @@
+---
+title: "batch-effects"
+author: "Anders Ellegaard"
+date: "2022-05-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput.
+
+In previous studies, we built bespoke Bayesian models to fit observations from a [biochemical assay](/project/bespoke-biochem-one) with kinetics that could be represented by the Hill equation. Then we scaled that up to a [screening experiment](/project/bespoke-biochem-two). In those studies, our main goal was to achieve good fits for kinetic parameters. In this study, we extend the screening experiment to account for variance outside the kinetics of the tissue response.
+
+```{r utilities, message=FALSE}
+library(ggplot2)
+library(magrittr)
+
+colour <- list(
+  orange_dark = "#fb8500",
+  orange_light = "#ffb703",
+  blue_dark = "#023047",
+  azure = "#219ebc",
+  blue_light = "#8ecae6"
+)
+
+set.seed(4444)
+```
+
+We do this as a demonstration of batch effects
+
+```{r hill_function}
+hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
+  top + (bottom - top)/(1 + 10^((log_IC50 - log_conc)*nH))
+}
+```
+
+Now, our observations are not perfect and will be subject to some noise. 
+
+```{r assay_response}
+assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
+  noise <- rnorm(length(log_conc), 0, sigma)
+  hill_function(log_conc, bottom, top, log_IC50, nH) + noise
+}
+```
+
+```{r true_parameters}
+n_batch_size <- 50
+n_batches <- 4
+n_compounds <- n_batches * n_batch_size
+
+true_parameters <- tibble::tibble(
+  compound = seq(1, n_compounds),
+  batch = rep(1:n_batches, each = n_batch_size),
+  bottom = 1 - rlnorm(n_compounds, -0.25, 0.125),
+  log_IC50 = rnorm(n_compounds, -5, 1.5) + rexp(n_compounds, 3),
+  top = 1.02,
+  nH = 0.99,
+  sigma = rep(seq(0.05, 0.4, length.out = n_batches), each = n_batch_size)
+)
+```
+
+
+```{r generative_model, fig.dim=c(8, 4), out.width="90%"}
+true_curves <- purrr::pmap(
+  dplyr::sample_n(true_parameters, size = 10),
+  ~ geom_function(
+    fun = hill_function,
+    args = list(
+      top = ..5,
+      bottom = ..3,
+      nH = ..6,
+      log_IC50 = ..4
+    ),
+    colour = colour$blue_dark,
+    alpha = 0.5
+  )
+)
+
+p <- ggplot() +
+  xlim(-9, -1) +
+  theme_minimal() +
+  labs(
+    x = "Ligand concentration [M]",
+    y = "True tissue response",
+    title = "Sample True Tissue Responses"
+  )
+
+Reduce(`+`, true_curves, init = p)
+```
+
+# Bespoke Bayesian Model
+
+Now that we understand the generative process and we have some data, we can start considering a Bayesian model. We need to specify two things; a set of relations that describe the generative process and priors for any parameters. If this seems similar to what we just did in the previous section, it is because it is. The Baysian model should reflect the process that generated the data. So let's get started.
+
+## Likelihood Model
+
+In our screening assay, we will consider $N_{compound}$ compounds $j = 1, ..., N_{compound}$. For each compound, we measure an assay response, $y_{ij}$, for a number, $i = 1, ..., N_{measurement}$, of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_{ij}$, but that observations are noisy. In the previous study, we assumed that all observations were made in the same batch, such that they had identically distributed noise. In this study, we imagine that we had to do our screening experiment in batches, $k = 1, ..., N_{batch}$, under slightly different conditions.
+
+$$y_{ijk} \sim {\sf Normal}(\mu_{ij}, \sigma_k)$$
+
+Note that the noise parameter, $\sigma_k$, is the same for some, but not all, compounds.
+
+The rest is just like the previous study
+
+$$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_{ij}]))^{n_H}}}$$
+
+## Priors
+
+For our priors, we employ the same as in the previous study.
+
+$$top \sim {\sf Normal}(1, 0.01)$$
+
+$$n_H \sim {\sf LogNormal}(0, 0.5)$$
+
+$$bottom_j \sim {\sf Normal}(0.25, 0.25)$$
+
+$$\log_{10}(IC_{50,j}) \sim {\sf Normal}(-6, 1.5)$$
+
+The only prior we might want to devote extra thought to
+
+$$\sigma_k \sim {\sf Exp}(10)$$
+
+```{r prior_generator}
+prior_parameters <- function(n_compounds = NULL,
+                             bottom_mean = NULL,
+                             bottom_sd = NULL,
+                             top_mean = NULL,
+                             top_sd = NULL,
+                             log_IC50_mean = NULL,
+                             log_IC50_sd = NULL,
+                             nH_meanlog = NULL,
+                             nH_sdlog = NULL,
+                             sigma_rate = NULL) {
+  tibble::tibble(
+      compound = seq(1, n_compounds),
+      bottom = rnorm(n_compounds, bottom_mean, bottom_sd),
+      log_IC50 = rnorm(n_compounds, log_IC50_mean, log_IC50_sd),
+      top = rnorm(1, top_mean, top_sd),
+      nH = rlnorm(1, nH_meanlog, nH_sdlog),
+      sigma = rexp(1, sigma_rate)
+    )
+}
+
+screening_experiment <- function(parameters, log_conc) {
+  parameters %>% 
+    tidyr::expand_grid(log_conc = log_conc) %>%
+    dplyr::mutate(
+      response = assay_response(log_conc, bottom, top, log_IC50, nH, sigma)
+    )
+}
+```
+
+```{r prior_predictive_check, fig.dim=c(8, 4), out.width="90%"}
+priors <- list(
+  bottom_mean <- 0.25,
+  bottom_sd <- 0.25,
+  top_mean <- 1,
+  top_sd <- 0.01,
+  log_IC50_mean <- -6,
+  log_IC50_sd <- 1.5,
+  nH_meanlog <- 0,
+  nH_sdlog <- 0.5,
+  sigma_rate <- 10
+)
+
+replicate(
+  10,
+  rlang::exec(
+    prior_parameters,
+    n_compounds = 5,
+    !!!priors
+  ),
+  simplify = FALSE
+) %>%
+  dplyr::bind_rows(.id = "rep") %>%
+  dplyr::mutate(rep = paste0(rep, "-", compound)) %>%
+  screening_experiment(log_conc = seq(-10, -2, length.out = 100)) %>%
+  ggplot(aes(x = log_conc, y = response, group = rep)) +
+    geom_line(colour = colour$blue_dark, alpha = 0.5) +
+    theme_minimal() +
+    labs(
+    x = "log ligand concentration",
+    y = "response",
+    title = "Prior Samples"
+    )
+```
+
+```{r stan_model}
+writeLines(readLines("hill_equation_batch_effects.stan"))
+```
+
+```{r model_conditioning, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
+assay_window <- seq(-8, -2, length.out = 6)
+
+observations <- screening_experiment(
+  parameters = true_parameters,
+  log_conc = assay_window
+)
+
+data <- list(
+  N = nrow(observations),
+  N_comp = n_compounds,
+  N_batch = n_batches,
+  comp = observations$compound,
+  batch = observations$batch,
+  log_conc = observations$log_conc,
+  y = observations$response
+)
+
+post <- rstan::stan_model("hill_equation_batch_effects.stan") %>%
+  rstan::sampling(
+    data = data,
+    chains = 4,
+    cores = 4,
+    seed = 4444
+  )
+
+# Extract samples from the posterior distribution
+posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
+```
+
+```{r convergence_check}
+post_summaries <- rstan::summary(
+  post,
+  pars = c("bottom", "log_IC50"),
+  probs = NULL
+)$summary
+
+tibble::as_tibble(post_summaries) %>%
+  dplyr::select(-c(mean, se_mean, sd)) %>%
+  dplyr::mutate(parameter = rownames(post_summaries), .before = 1) %>%
+  dplyr::mutate(dplyr::across(-parameter, round, digits = 3)) %>%
+  dplyr::arrange(desc(Rhat)) %>%
+  dplyr::slice_head(n = 10) %>%
+  knitr::kable()
+```
+
+```{r posterior_marginals_shared, fig.dim=c(8, 4), out.width="90%"}
+# True parameters of the simulation.
+truth <- true_parameters %>%
+  dplyr::slice_head(n = 1) %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "truth"
+  )
+
+# A number of draws from our priors to match the number of draws we have from
+#  the posterior
+prior_samples <- replicate(
+  nrow(posterior_samples),
+  rlang::exec(
+    prior_parameters,
+    n_compounds = 1,
+    !!!priors
+  ),
+  simplify = FALSE
+) %>% 
+  dplyr::bind_rows() %>%
+  dplyr::select(top, nH) %>% 
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  )
+
+
+# Plot each of the marginal distributions, comparing prior, posterior, and true
+#  simulation parameters
+posterior_samples %>%
+  dplyr::select(top, nH) %>%
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  dplyr::left_join(truth, by = "parameter") %>%
+  ggplot() +
+  geom_histogram(
+    data = prior_samples,
+    mapping = aes(x = sample, fill = "Prior"),
+    bins = 50,
+    alpha = 0.5
+  ) +
+  geom_histogram(aes(x = sample, fill = "Posterior"), bins = 50, alpha = 0.5) +
+  geom_vline(aes(xintercept = truth, colour = "truth"), alpha = 0.5) +
+  facet_wrap(~ parameter, scales = "free") +
+  theme_minimal() +
+  scale_colour_manual(values = c("truth" = colour$orange_light)) +
+  scale_fill_manual(values = c(
+    "Prior" = colour$azure,
+    "Posterior" = colour$blue_dark
+  )) +
+  labs(
+    y = "Posterior sample count",
+    x = "",
+    colour = "",
+    fill = "",
+    title = "Marginal Posterior and Prior Distributions"
+  )
+```
+
+```{r posterior_marginals_sigma, fig.dim=c(8, 4), out.width="90%"}
+
+# True parameters of the simulation.
+truth <- true_parameters %>%
+  dplyr::select(batch, sigma) %>%
+  dplyr::distinct() %>%
+  tidyr::pivot_longer(
+    -batch,
+    names_to = "parameter",
+    values_to = "truth"
+  )
+
+unpack_matrix <- function(data, cols) {
+  for (col in cols) {
+    mat <- data[[col]]
+    for (i in 1:dim(mat)[[2]]) {
+      cname <- paste0(col, i)
+      data <- dplyr::mutate(data, "{cname}" := mat[,i])
+    }
+  }
+  dplyr::select(data, -dplyr::all_of(cols))
+}
+
+# A number of draws from our priors to match the number of draws we have from
+#  the posterior
+prior_samples <- replicate(
+  nrow(posterior_samples),
+  rlang::exec(
+    prior_parameters,
+    n_compounds = 1,
+    !!!priors
+  ),
+  simplify = FALSE
+) %>% 
+  dplyr::bind_rows() %>%
+  dplyr::select(sigma) %>% 
+  tidyr::pivot_longer(
+    dplyr::everything(),
+    names_to = "parameter",
+    values_to = "sample"
+  )
+
+# Plot each of the marginal distributions, comparing prior, posterior, and true
+#  simulation parameters
+lapply(1:n_batches, function(i) {
+  tibble::tibble(
+    sigma = posterior_samples$sigma[,i],
+    batch = i
+  )
+}) %>%
+  dplyr::bind_rows() %>%
+  tidyr::pivot_longer(
+    -batch,
+    names_to = "parameter",
+    values_to = "sample"
+  ) %>%
+  dplyr::left_join(truth, by = c("parameter", "batch")) %>%
+  ggplot() +
+  geom_histogram(
+    data = prior_samples,
+    mapping = aes(x = sample, fill = "Prior"),
+    bins = 50,
+    alpha = 0.5
+  ) +
+  geom_histogram(aes(x = sample, fill = "Posterior"), bins = 50, alpha = 0.5) +
+  geom_vline(aes(xintercept = truth, colour = "truth"), alpha = 0.5) +
+  facet_grid(rows = vars(batch), cols = vars(parameter), scales = "free") +
+  theme_minimal() +
+  theme(strip.text.y = element_text(angle = 0)) +
+  scale_colour_manual(values = c("truth" = colour$orange_light)) +
+  scale_fill_manual(values = c(
+    "Prior" = colour$azure,
+    "Posterior" = colour$blue_dark
+  )) +
+  labs(
+    y = "Posterior sample count",
+    x = "",
+    colour = "",
+    fill = "",
+    title = "Marginal Posterior and Prior Distributions"
+  )
+```
+
+# Perspective
+
+This approach is expandable, and it is easy to imagine a situation where the model includes expressions that relate either efficacy or potency to known variations among compounds. That way we combine the power of screening assays with the structure of experiments and possibly derive much more information from our hard earned data.
