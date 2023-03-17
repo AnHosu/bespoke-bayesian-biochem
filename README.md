@@ -1,6 +1,6 @@
 # Bespoke Bayesian Biochemistry
 
-This is the repo for my Bespoke Bayesian Biochemistry project. For rendered versions of this page and individual sections, visit [my website](https://anhosu.com/project/bayesian-optimisation/).
+This is the repo for my Bespoke Bayesian Biochemistry project. For rendered versions of this page and individual sections, visit [my website](https://anhosu.com/project/bayesian-biochemistry/).
 
 I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput. I have been using classical machine learning techniques and generic fitting and optimisation functions to interpret data from such assays. While this approach works, it also neglects much of the available domain expertise. Many of the underlying biochemical mechanisms are known and I would like my models to take that into account so I get results that are more directly interpretable in the context of the hypothesis that required the assay in the first place. In other words, I want a bespoke model.
 
