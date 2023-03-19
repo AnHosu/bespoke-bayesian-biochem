@@ -1,7 +1,7 @@
 ---
-title: "batch-effects"
+title: ""
 author: "Anders Ellegaard"
-date: "2022-05-07"
+date: "2023-03-19"
 output: html_document
 ---
 
@@ -9,9 +9,9 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-I am on a quest to improve the model fitting I do on biochemical assays. For some time, I have had this feeling that I should be able to extract more information from the data gathered in biochemical assays, in particular assays with a high throughput.
+In previous studies, we built bespoke Bayesian models to fit observations from a [biochemical assay](../bespoke-biochem-one) with kinetics that could be represented by the Hill equation. Then we scaled that up to a [screening experiment](../bespoke-biochem-two). In those studies, our main goal was to achieve good fits for kinetic parameters.
 
-In previous studies, we built bespoke Bayesian models to fit observations from a [biochemical assay](/project/bespoke-biochem-one) with kinetics that could be represented by the Hill equation. Then we scaled that up to a [screening experiment](/project/bespoke-biochem-two). In those studies, our main goal was to achieve good fits for kinetic parameters. In this study, we extend the screening experiment to account for variance outside the kinetics of the tissue response.
+In this study, we extend the screening experiment to account for variance outside the kinetics of the tissue response. This can be used to account for batch variation, as is demonstrated here, but could also be used to account for other covariates of interest.
 
 ```{r utilities, message=FALSE}
 library(ggplot2)
@@ -24,11 +24,17 @@ colour <- list(
   azure = "#219ebc",
   blue_light = "#8ecae6"
 )
-
-set.seed(4444)
+seed <- 4444
+set.seed(seed)
 ```
 
-We do this as a demonstration of batch effects
+# Generative Model
+
+As as always the case in a Bayesian modelling workflow, we start by considering the process that generated the data. Along the way, we will generate simulations from the generative process.
+
+The process in this case is going to be similar to the screening experiment of the previous post, but we are imagining a scenario where we perform the screening experiment in four batches. We want to combine and compare results from the four batches, but we also realise that the conditions might vary slightly between each batch, so we need some way to account for that.
+
+Each tested compound is expected to follow a dose-response curve as described by the Hill equation.
 
 ```{r hill_function}
 hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
@@ -36,14 +42,26 @@ hill_function <- function(log_conc, bottom, top, log_IC50, nH) {
 }
 ```
 
-Now, our observations are not perfect and will be subject to some noise. 
+In our assay, we test each compound at different concentrations and observe the corresponding response. We expect that this response is noisy 
 
 ```{r assay_response}
 assay_response <- function(log_conc, bottom, top, log_IC50, nH, sigma) {
   noise <- rnorm(length(log_conc), 0, sigma)
   hill_function(log_conc, bottom, top, log_IC50, nH) + noise
 }
+
+screening_experiment <- function(parameters, log_conc) {
+  parameters %>% 
+    tidyr::expand_grid(log_conc = log_conc) %>%
+    dplyr::mutate(
+      response = assay_response(log_conc, bottom, top, log_IC50, nH, sigma)
+    )
+}
 ```
+
+Now we can define some parameters for the experiment. It is these parameters that we should be able to recover with the Bayesian model later.
+
+We imagine an experiment of four batches with 50 compounds each. The compounds are randomly assigned to batches, so there is no correlation between batch and compound parameters. However, the batches are expected to have different levels of noise in the observations.
 
 ```{r true_parameters}
 n_batch_size <- 50
@@ -61,6 +79,7 @@ true_parameters <- tibble::tibble(
 )
 ```
 
+Let's plot a few curves just to make sure that we have got the generative process right.
 
 ```{r generative_model, fig.dim=c(8, 4), out.width="90%"}
 true_curves <- purrr::pmap(
@@ -92,23 +111,23 @@ Reduce(`+`, true_curves, init = p)
 
 # Bespoke Bayesian Model
 
-Now that we understand the generative process and we have some data, we can start considering a Bayesian model. We need to specify two things; a set of relations that describe the generative process and priors for any parameters. If this seems similar to what we just did in the previous section, it is because it is. The Baysian model should reflect the process that generated the data. So let's get started.
+Now that we understand the generative process and we have functions to simulate data, we can start considering a Bayesian model. We need to specify two things; a set of relations that describe the generative process and priors for any parameters. If this seems similar to what we did in the previous post, it is because it is. The Bayesian model should reflect the process that generated the data, and the process is only slightly different to what we did before. So let's get started.
 
 ## Likelihood Model
 
-In our screening assay, we will consider $N_{compound}$ compounds $j = 1, ..., N_{compound}$. For each compound, we measure an assay response, $y_{ij}$, for a number, $i = 1, ..., N_{measurement}$, of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_{ij}$, but that observations are noisy. In the previous study, we assumed that all observations were made in the same batch, such that they had identically distributed noise. In this study, we imagine that we had to do our screening experiment in batches, $k = 1, ..., N_{batch}$, under slightly different conditions.
+In our screening assay, we will consider $N_{compound}$ compounds $j = 1, ..., N_{compound}$. For each compound, we measure an assay response, $y_{ij}$, for a number, $i = 1, ..., N_{measurement}$, of ligand concentrations $[A_{ij}]$. We also know that the assay response averages to the tissue response, $\mu_{ij}$, but that observations are noisy. Previously, we assumed that all observations were made in the same batch, such that they had identically distributed noise. In this study, we imagine that we had to do our screening experiment in batches, $k = 1, ..., N_{batch}$, under slightly different conditions.
 
 $$y_{ijk} \sim {\sf Normal}(\mu_{ij}, \sigma_k)$$
 
 Note that the noise parameter, $\sigma_k$, is the same for some, but not all, compounds.
 
-The rest is just like the previous study
+The dose-response is the same as always
 
 $$\mu_{ij} = top - \frac{bottom_j - top}{1 + 10^{(\log_{10}(IC_{50,j}) - \log_{10}([A_{ij}]))^{n_H}}}$$
 
 ## Priors
 
-For our priors, we employ the same as in the previous study.
+For our priors, we employ the same as in the previous post
 
 $$top \sim {\sf Normal}(1, 0.01)$$
 
@@ -118,9 +137,11 @@ $$bottom_j \sim {\sf Normal}(0.25, 0.25)$$
 
 $$\log_{10}(IC_{50,j}) \sim {\sf Normal}(-6, 1.5)$$
 
-The only prior we might want to devote extra thought to
+The only prior that is a little different is the batch noise, which is now four parameters. We expect the four parameters to be different but sampled from the same distribution.
 
 $$\sigma_k \sim {\sf Exp}(10)$$
+
+Let's define a function that we can use to sample compounds from the assumed prior distributions.
 
 ```{r prior_generator}
 prior_parameters <- function(n_compounds = NULL,
@@ -142,15 +163,9 @@ prior_parameters <- function(n_compounds = NULL,
       sigma = rexp(1, sigma_rate)
     )
 }
-
-screening_experiment <- function(parameters, log_conc) {
-  parameters %>% 
-    tidyr::expand_grid(log_conc = log_conc) %>%
-    dplyr::mutate(
-      response = assay_response(log_conc, bottom, top, log_IC50, nH, sigma)
-    )
-}
 ```
+
+Let's also sample some dose-response curves from our assumed joint prior distribution. Hopefully the curves will be similar to those simulated from the generative model, but with a bit of noise.
 
 ```{r prior_predictive_check, fig.dim=c(8, 4), out.width="90%"}
 priors <- list(
@@ -187,11 +202,19 @@ replicate(
     )
 ```
 
+The sampled dose-responses look reasonable.
+
+## Stan Implementation
+
+The likelihood and priors are relatively straightforward to implement in Stan. Each observation now has two indexes, one linking it to a compound and one linking it to a specific batch.
+
 ```{r stan_model}
 writeLines(readLines("hill_equation_batch_effects.stan"))
 ```
 
-```{r model_conditioning, message=FALSE, warning=FALSE, error=FALSE, results="hide"}
+Now we can condition the model on some training data. We simulate some data, compile an input for the Stan model, and sample from the posterior
+
+```{r model_conditioning, message=FALSE, warning=FALSE, error=FALSE, results="hide", cache=TRUE}
 assay_window <- seq(-8, -2, length.out = 6)
 
 observations <- screening_experiment(
@@ -214,17 +237,21 @@ post <- rstan::stan_model("hill_equation_batch_effects.stan") %>%
     data = data,
     chains = 4,
     cores = 4,
-    seed = 4444
+    iter = 4000,
+    seed = seed
   )
 
 # Extract samples from the posterior distribution
-posterior_samples <- rstan::extract(post) %>% tibble::as_tibble()
+posterior_samples <- tibble::as_tibble(rstan::extract(post))
 ```
+
+# Model Evaluation
+
+Before diving into the posterior distribution, we should check to see that we have good quality samples for each parameter
 
 ```{r convergence_check}
 post_summaries <- rstan::summary(
   post,
-  pars = c("bottom", "log_IC50"),
   probs = NULL
 )$summary
 
@@ -236,6 +263,12 @@ tibble::as_tibble(post_summaries) %>%
   dplyr::slice_head(n = 10) %>%
   knitr::kable()
 ```
+
+$\hat{R} < 1.01$ for all parameters and it looks like we have at least a couple hundred effective samples, so we should be ready to look at the posterior distribution.
+
+## Shared Parameters
+
+Let's start with a look at $n_H$ and $top$ which are shared parameters among all compounds
 
 ```{r posterior_marginals_shared, fig.dim=c(8, 4), out.width="90%"}
 # True parameters of the simulation.
@@ -302,8 +335,11 @@ posterior_samples %>%
   )
 ```
 
-```{r posterior_marginals_sigma, fig.dim=c(8, 4), out.width="90%"}
+We seem to have recovered the true underlying parameters nicely.
 
+Next up is the batch noise. We had four batches so there are four noise parameters, and hopefully they look different
+
+```{r posterior_marginals_sigma, fig.dim=c(8, 4), out.width="90%"}
 # True parameters of the simulation.
 truth <- true_parameters %>%
   dplyr::select(batch, sigma) %>%
@@ -385,54 +421,67 @@ lapply(1:n_batches, function(i) {
   )
 ```
 
+Our model has successfully recovered the noise parameter for each batch, even though they are different.
+
+## Posterior Curves
+
+It is cool that we are able to recover different noise levels for each batch. However, it is important that this does not come at the cost of worse dose-response curve fits. So let's check that we are still able to determine good curve parameters.
+
+I have deliberately chosen one easy and one challenging curve.
+
 ```{r posterior_predictive, fig.dim=c(8, 4), out.width="90%"}
 example_curves <- tibble::tibble(curve = c(3, 180))
 example_curves$post_pred <- purrr::map(example_curves$curve, function(i) {
   posterior_samples %>%
-  dplyr::mutate(
-    log_IC50 = log_IC50[, i],
-    bottom = bottom[, i]
-  ) %>%
-  tidyr::expand_grid(log_conc = seq(-2, -9, length.out = 50)) %>% 
-  dplyr::mutate(tissue_response = purrr::pmap_dbl(
-    list(log_conc, bottom, top, log_IC50, nH),
-    hill_function
-  )) %>%
-  dplyr::group_by(log_conc) %>%
-  dplyr::summarise(
-    response_mean = mean(tissue_response),
-    response_upper = quantile(tissue_response, probs = 0.945),
-    response_lower = quantile(tissue_response, probs = 0.055)
-  ) %>%
-  ggplot() +
-  geom_ribbon(
-    aes(
+    dplyr::sample_n(4000) %>% # Ran out of RAM...
+    dplyr::mutate(
+      log_IC50 = log_IC50[, i],
+      bottom = bottom[, i]
+    ) %>%
+    tidyr::expand_grid(log_conc = seq(-2, -9, length.out = 50)) %>% 
+    dplyr::mutate(tissue_response = purrr::pmap_dbl(
+      list(log_conc, bottom, top, log_IC50, nH),
+      hill_function
+    )) %>%
+    dplyr::group_by(log_conc) %>%
+    dplyr::summarise(
+      response_mean = mean(tissue_response),
+      response_upper = quantile(tissue_response, probs = 0.945),
+      response_lower = quantile(tissue_response, probs = 0.055)
+    ) %>%
+    ggplot() +
+    geom_ribbon(
+      aes(
+        x = log_conc,
+        ymin = response_lower,
+        ymax = response_upper,
+        fill = "89% interval"
+      ),
+      alpha = 0.5
+    ) +
+    geom_line(aes(
       x = log_conc,
-      ymin = response_lower,
-      ymax = response_upper,
-      fill = "89% interval"
-    ),
-    alpha = 0.5
-  ) +
-  geom_line(aes(x = log_conc, y = response_mean, colour = "Posterior mean")) +
-  geom_point(
-    data = dplyr::filter(observations, compound == i),
-    aes(x = log_conc, y = response, colour = "Observations")
-  ) +
-  geom_function(
-    fun = hill_function,
-    args = true_parameters[i, -c(1,2,7)],
-    mapping = aes(colour = "True tissue response")
-  ) +
-  labs(
-    y = "Tissue response",
-    x = "Log ligand concentration [M]",
-    colour = "",
-    fill = "",
-    title = paste("Posterior Predictive for Compound", i)
-  ) +
-  scale_fill_manual(values = c("89% interval" = colour$azure)) +
-  theme_minimal()
+      y = response_mean,
+      colour = "Posterior mean"
+    )) +
+    geom_point(
+      data = dplyr::filter(observations, compound == i),
+      aes(x = log_conc, y = response, colour = "Observations")
+    ) +
+    geom_function(
+      fun = hill_function,
+      args = true_parameters[i, -c(1,2,7)],
+      mapping = aes(colour = "True tissue response")
+    ) +
+    labs(
+      y = "Tissue response",
+      x = "Log ligand concentration [M]",
+      colour = "",
+      fill = "",
+      title = paste("Posterior Predictive for Compound", i)
+    ) +
+    scale_fill_manual(values = c("89% interval" = colour$azure)) +
+    theme_minimal()
 })
 example_curves$post_pred_coloured <- purrr::map(
   example_curves$post_pred,
@@ -444,10 +493,22 @@ example_curves$post_pred_coloured <- purrr::map(
     ))
   }
 )
+```
+
+For the well-behaved curve, all looks good and the uncertainty around the key parameters is fairly small.
+
+```{r}
+example_curves$post_pred_coloured[[1]]
+```
+
+Even in the difficult case, we get a decent fit, demonstrating that we can still get good curves even with the addition of additional parameters to account for batch effects.
+
+```{r}
 example_curves$post_pred_coloured[[2]]
 ```
 
-
 # Perspective
 
-This approach is expandable, and it is easy to imagine a situation where the model includes expressions that relate either efficacy or potency to known variations among compounds. That way we combine the power of screening assays with the structure of experiments and possibly derive much more information from our hard earned data.
+In this post, we extended our model for the dose-response screening experiment to also include batch effects. We demonstrated that batch effects can be recovered without compromising on curve parameter quality.
+
+Accounting for batch effects is already very useful, but the approach can be expanded to even more useful situations. Imagine, for instance, a case where the model includes expressions that relate either efficacy or potency to known variations among compounds. That way we combine the power of screening assays with the structure of experiments and possibly derive much more information from our hard earned data.
