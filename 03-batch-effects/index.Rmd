@@ -2,7 +2,11 @@
 title: ""
 author: "Anders Ellegaard"
 date: "2023-03-19"
-output: html_document
+format:
+  html:
+    fig-width: 8
+    fig-height: 5
+    theme: none
 ---
 
 ```{r setup, include=FALSE}
